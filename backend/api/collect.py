@@ -856,3 +856,137 @@ async def list_xhs_images(
         ],
     }
 
+
+# ── 小红书视频/图片下载 ──────────────────────────────────────────
+
+class DownloadVideosBody(BaseModel):
+    """下载视频"""
+    video_ids: list[int] = []  # XhsVideo.id 列表，为空则下载所有未下载的
+    quality: str = "default"  # 1080p / 720p / 480p / default
+
+
+@router.post("/xhs-download-videos")
+async def download_xhs_videos(
+    body: DownloadVideosBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    下载小红书视频到服务器
+    """
+    from services.xhs_downloader import download_xhs_video
+    import asyncio
+
+    # 获取待下载的视频
+    if body.video_ids:
+        q = select(XhsVideo).where(XhsVideo.id.in_(body.video_ids))
+    else:
+        q = select(XhsVideo).where(XhsVideo.download_status == "pending").limit(20)
+
+    result = await db.execute(q)
+    videos = result.scalars().all()
+
+    downloaded = 0
+    failed = 0
+
+    for v in videos:
+        # 获取对应画质的 URL
+        url_map = {
+            "1080p": v.video_url_1080p,
+            "720p": v.video_url_720p,
+            "480p": v.video_url_480p,
+            "default": v.video_url_default,
+        }
+        video_url = url_map.get(body.quality) or v.video_url_default
+
+        if not video_url:
+            failed += 1
+            continue
+
+        v.download_status = "downloading"
+        await db.commit()
+
+        try:
+            res = await download_xhs_video(
+                note_id=v.note_id,
+                video_url=video_url,
+                quality=body.quality,
+            )
+            if res.get("success"):
+                v.download_status = "done"
+                v.local_path = res.get("path", "")
+                downloaded += 1
+            else:
+                v.download_status = "failed"
+                failed += 1
+        except Exception:
+            v.download_status = "failed"
+            failed += 1
+
+        await asyncio.sleep(1)
+
+    await db.commit()
+    return {"downloaded": downloaded, "failed": failed}
+
+
+class DownloadImagesBody(BaseModel):
+    """下载图片"""
+    image_ids: list[int] = []  # XhsImage.id 列表，为空则下载所有未下载的
+    use_original: bool = True  # True=无水印，False=有水印
+
+
+@router.post("/xhs-download-images")
+async def download_xhs_images(
+    body: DownloadImagesBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    下载小红书图片到服务器
+    """
+    from services.xhs_downloader import download_xhs_image
+    import asyncio
+
+    # 获取待下载的图片
+    if body.image_ids:
+        q = select(XhsImage).where(XhsImage.id.in_(body.image_ids))
+    else:
+        q = select(XhsImage).where(XhsImage.download_status == "pending").limit(50)
+
+    result = await db.execute(q)
+    images = result.scalars().all()
+
+    downloaded = 0
+    failed = 0
+
+    for img in images:
+        url = img.url_original if body.use_original else img.url_watermark
+
+        if not url:
+            failed += 1
+            continue
+
+        img.download_status = "downloading"
+        await db.commit()
+
+        try:
+            res = await download_xhs_image(
+                note_id=img.note_id,
+                image_url=url,
+                image_index=img.image_index,
+                watermark=not body.use_original,
+            )
+            if res.get("success"):
+                img.download_status = "done"
+                img.local_path = res.get("path", "")
+                downloaded += 1
+            else:
+                img.download_status = "failed"
+                failed += 1
+        except Exception:
+            img.download_status = "failed"
+            failed += 1
+
+        await asyncio.sleep(0.5)
+
+    await db.commit()
+    return {"downloaded": downloaded, "failed": failed}
+

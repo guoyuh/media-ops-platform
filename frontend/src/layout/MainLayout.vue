@@ -18,6 +18,10 @@
           <el-icon><Search /></el-icon>
           <template #title>采集任务</template>
         </el-menu-item>
+        <el-menu-item index="/media">
+          <el-icon><Picture /></el-icon>
+          <template #title>媒体资源</template>
+        </el-menu-item>
         <el-menu-item index="/users">
           <el-icon><User /></el-icon>
           <template #title>用户库</template>
@@ -51,7 +55,7 @@ import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { storeToRefs } from 'pinia'
 import {
-  DataBoard, Search, User, ChatDotRound, Setting, Fold, Expand,
+  DataBoard, Search, User, ChatDotRound, Setting, Fold, Expand, Picture,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
