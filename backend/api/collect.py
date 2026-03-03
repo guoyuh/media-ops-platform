@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func as sa_func, delete as sa_delete
 from database import get_db
-from models.task import CollectTask, VideoPost, PostComment, XhsNote, XhsComment
+from models.task import CollectTask, VideoPost, PostComment, XhsNote, XhsComment, XhsVideo, XhsImage
 from models.user import CollectedUser
 from pydantic import BaseModel
 
@@ -671,6 +671,188 @@ async def list_xhs_users(
                 "created_at": u.created_at.isoformat() if u.created_at else None,
             }
             for u in users
+        ],
+    }
+
+
+# ── 小红书视频/图片解析 ──────────────────────────────────────────
+
+class ParseMediaBody(BaseModel):
+    """解析笔记媒体资源"""
+    note_ids: list[str]
+    account_id: int
+    save_to_db: bool = True  # 是否保存到数据库
+
+
+@router.post("/xhs-parse-media")
+async def parse_xhs_media(
+    body: ParseMediaBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    解析小红书笔记的视频/图片资源
+
+    返回多画质视频直链和有水印/无水印图片链接
+    """
+    from models.account import PlatformAccount
+    from services.xhs_media import parse_xhs_note_media
+    import asyncio
+
+    account = await db.get(PlatformAccount, body.account_id)
+    if not account or not account.cookies:
+        return {"error": "Account not found or no cookies"}
+    if account.platform != "xhs":
+        return {"error": "账号不是小红书平台"}
+
+    results = []
+    videos_added = 0
+    images_added = 0
+
+    for note_id in body.note_ids:
+        try:
+            result = await parse_xhs_note_media(account.cookies, note_id)
+            results.append(result)
+
+            if body.save_to_db and result.get("success"):
+                if result.get("type") == "video" and result.get("video"):
+                    # 保存视频信息
+                    video_info = result["video"]
+                    # 检查是否已存在
+                    exists = await db.scalar(
+                        select(XhsVideo.id).where(XhsVideo.note_id == note_id).limit(1)
+                    )
+                    if not exists:
+                        video = XhsVideo(
+                            note_id=note_id,
+                            title=result.get("title", ""),
+                            cover_url=result.get("cover_url", ""),
+                            video_url_1080p=video_info.get("video_url_1080p", ""),
+                            video_url_720p=video_info.get("video_url_720p", ""),
+                            video_url_480p=video_info.get("video_url_480p", ""),
+                            video_url_default=video_info.get("video_url_default", ""),
+                            duration=video_info.get("duration", 0),
+                            width=video_info.get("width", 0),
+                            height=video_info.get("height", 0),
+                        )
+                        db.add(video)
+                        videos_added += 1
+
+                elif result.get("images"):
+                    # 保存图片信息
+                    for img in result["images"]:
+                        # 检查是否已存在
+                        exists = await db.scalar(
+                            select(XhsImage.id).where(
+                                XhsImage.note_id == note_id,
+                                XhsImage.image_index == img["index"],
+                            ).limit(1)
+                        )
+                        if not exists:
+                            image = XhsImage(
+                                note_id=note_id,
+                                image_index=img["index"],
+                                url_watermark=img.get("url_watermark", ""),
+                                url_original=img.get("url_original", ""),
+                                width=img.get("width", 0),
+                                height=img.get("height", 0),
+                            )
+                            db.add(image)
+                            images_added += 1
+
+        except Exception as e:
+            results.append({"note_id": note_id, "success": False, "error": str(e)})
+
+        await asyncio.sleep(2)  # 避免频繁请求
+
+    await db.commit()
+
+    return {
+        "results": results,
+        "videos_added": videos_added,
+        "images_added": images_added,
+    }
+
+
+@router.get("/xhs-videos")
+async def list_xhs_videos(
+    db: AsyncSession = Depends(get_db),
+    note_id: str | None = None,
+    page: int = 1,
+    size: int = 20,
+):
+    """列出已解析的小红书视频"""
+    q = select(XhsVideo)
+    total_q = select(sa_func.count(XhsVideo.id))
+
+    if note_id:
+        q = q.where(XhsVideo.note_id == note_id)
+        total_q = total_q.where(XhsVideo.note_id == note_id)
+
+    q = q.order_by(XhsVideo.id.desc())
+    total = await db.scalar(total_q) or 0
+    result = await db.execute(q.offset((page - 1) * size).limit(size))
+    videos = result.scalars().all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": v.id,
+                "note_id": v.note_id,
+                "title": v.title,
+                "cover_url": v.cover_url,
+                "video_url_1080p": v.video_url_1080p,
+                "video_url_720p": v.video_url_720p,
+                "video_url_480p": v.video_url_480p,
+                "video_url_default": v.video_url_default,
+                "duration": v.duration,
+                "width": v.width,
+                "height": v.height,
+                "download_status": v.download_status,
+                "local_path": v.local_path,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+            }
+            for v in videos
+        ],
+    }
+
+
+@router.get("/xhs-images")
+async def list_xhs_images(
+    db: AsyncSession = Depends(get_db),
+    note_id: str | None = None,
+    page: int = 1,
+    size: int = 50,
+):
+    """列出已解析的小红书图片"""
+    q = select(XhsImage)
+    total_q = select(sa_func.count(XhsImage.id))
+
+    if note_id:
+        q = q.where(XhsImage.note_id == note_id)
+        total_q = total_q.where(XhsImage.note_id == note_id)
+
+    q = q.order_by(XhsImage.note_id, XhsImage.image_index)
+    total = await db.scalar(total_q) or 0
+    result = await db.execute(q.offset((page - 1) * size).limit(size))
+    images = result.scalars().all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": i.id,
+                "note_id": i.note_id,
+                "image_index": i.image_index,
+                "url_watermark": i.url_watermark,
+                "url_original": i.url_original,
+                "width": i.width,
+                "height": i.height,
+                "download_status": i.download_status,
+                "local_path": i.local_path,
+                "created_at": i.created_at.isoformat() if i.created_at else None,
+            }
+            for i in images
         ],
     }
 

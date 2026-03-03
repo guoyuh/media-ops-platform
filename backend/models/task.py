@@ -122,3 +122,41 @@ class XhsComment(Base):
     create_time = Column(BigInteger)
     source_task_id = Column(Integer, index=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class XhsVideo(Base):
+    """小红书视频资源"""
+    __tablename__ = "xhs_videos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    note_id = Column(String(64), nullable=False, index=True)
+    title = Column(String(512))
+    cover_url = Column(Text)
+    video_url_1080p = Column(Text)
+    video_url_720p = Column(Text)
+    video_url_480p = Column(Text)
+    video_url_default = Column(Text)  # 默认/最佳画质
+    duration = Column(Integer)  # 时长（毫秒）
+    width = Column(Integer)
+    height = Column(Integer)
+    download_status = Column(String(20), default="pending")  # pending/downloading/done/failed
+    local_path = Column(Text)
+    source_task_id = Column(Integer, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class XhsImage(Base):
+    """小红书图片资源"""
+    __tablename__ = "xhs_images"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    note_id = Column(String(64), nullable=False, index=True)
+    image_index = Column(Integer, default=0)  # 图片序号
+    url_watermark = Column(Text)  # 有水印 URL
+    url_original = Column(Text)  # 无水印 URL
+    width = Column(Integer)
+    height = Column(Integer)
+    download_status = Column(String(20), default="pending")
+    local_path = Column(Text)
+    source_task_id = Column(Integer, index=True)
+    created_at = Column(DateTime, server_default=func.now())

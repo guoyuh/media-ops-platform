@@ -185,10 +185,14 @@
             已选 {{ selectedXhsNotes.length }} 篇笔记
           </span>
           <div style="display:flex;gap:10px;align-items:center">
-            <el-select v-model="selectedXhsAccountId" placeholder="选择账号获取详情" style="width:180px" size="small">
+            <el-select v-model="selectedXhsAccountId" placeholder="选择账号" style="width:160px" size="small">
               <el-option v-for="a in xhsAccounts" :key="a.id" :label="a.account_name" :value="a.id" />
             </el-select>
             <el-button @click="xhsNoteDialogVisible = false">关闭</el-button>
+            <el-button type="success" :disabled="!selectedXhsNotes.length || !selectedXhsAccountId"
+              :loading="parseMediaLoading" @click="parseNoteMedia">
+              解析媒体
+            </el-button>
             <el-button type="warning" :disabled="!selectedXhsNotes.length"
               @click="extractUsersFromNotes">
               提取作者
@@ -300,6 +304,7 @@ const onPlatformChange = () => {
 // ── XHS 账号（用于提取用户时获取详情）───────────────────────
 const xhsAccounts = ref<any[]>([])
 const selectedXhsAccountId = ref<number | null>(null)
+const parseMediaLoading = ref(false)
 
 const loadXhsAccounts = async () => {
   try {
@@ -482,6 +487,39 @@ const addXhsNotesToTouch = async () => {
     xhsNoteDialogVisible.value = false
   } catch {
     ElMessage.error('加入触达失败')
+  }
+}
+
+const parseNoteMedia = async () => {
+  if (!selectedXhsAccountId.value) {
+    ElMessage.warning('请先选择小红书账号')
+    return
+  }
+  const note_ids = selectedXhsNotes.value.map((n: any) => n.note_id)
+  parseMediaLoading.value = true
+  try {
+    const { data } = await http.post('/api/collect/xhs-parse-media', {
+      note_ids,
+      account_id: selectedXhsAccountId.value,
+      save_to_db: true,
+    })
+    if (data.error) {
+      ElMessage.error(data.error)
+    } else {
+      let msg = `解析完成`
+      if (data.videos_added) msg += `，新增视频 ${data.videos_added} 个`
+      if (data.images_added) msg += `，新增图片 ${data.images_added} 张`
+      ElMessage.success(msg)
+      // 显示解析结果详情
+      const failed = data.results?.filter((r: any) => !r.success) || []
+      if (failed.length) {
+        console.warn('解析失败的笔记:', failed)
+      }
+    }
+  } catch {
+    ElMessage.error('解析媒体失败')
+  } finally {
+    parseMediaLoading.value = false
   }
 }
 
