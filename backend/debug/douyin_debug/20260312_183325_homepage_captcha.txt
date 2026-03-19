@@ -1,2 +1,0 @@
-url=https://www.douyin.com/
-title=验证码中间页
