@@ -17,10 +17,18 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="Cookie 状态" width="130">
+          <template #default="{ row }">
+            <el-tag v-if="row._cookieStatus === 'valid'" type="success" size="small">有效</el-tag>
+            <el-tag v-else-if="row._cookieStatus === 'invalid'" type="danger" size="small">已失效</el-tag>
+            <el-tag v-else type="info" size="small">未检测</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="daily_limit" label="日限额" width="100" />
         <el-table-column prop="used_today" label="今日已用" width="100" />
-        <el-table-column label="操作" width="120">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
+            <el-button size="small" :loading="row._checking" @click="checkCookie(row)">检测Cookie</el-button>
             <el-button size="small" type="danger" @click="deleteAccount(row.id)">删除</el-button>
           </template>
         </el-table-column>
@@ -36,6 +44,7 @@
           <el-select v-model="form.platform">
             <el-option label="B站" value="bilibili" />
             <el-option label="小红书" value="xhs" />
+            <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
         <el-form-item label="Cookies">
@@ -81,6 +90,27 @@ const deleteAccount = async (id: number) => {
   await http.delete(`/api/accounts/${id}`)
   ElMessage.success('已删除')
   loadAccounts()
+}
+
+const checkCookie = async (row: any) => {
+  row._checking = true
+  try {
+    const { data } = await http.post(`/api/accounts/${row.id}/check-cookie`)
+    if (data.valid === true) {
+      row._cookieStatus = 'valid'
+      ElMessage.success(data.nickname ? `Cookie 有效 (${data.nickname})` : 'Cookie 有效')
+    } else if (data.valid === false) {
+      row._cookieStatus = 'invalid'
+      ElMessage.error(data.msg || 'Cookie 已失效，请更新')
+    } else {
+      row._cookieStatus = 'unknown'
+      ElMessage.info(data.msg || '暂不支持检测')
+    }
+  } catch {
+    ElMessage.error('检测请求失败')
+  } finally {
+    row._checking = false
+  }
 }
 
 onMounted(loadAccounts)

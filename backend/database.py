@@ -19,3 +19,14 @@ async def init_db():
     import models  # noqa: F401 — ensure all models are registered on Base.metadata
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 增量迁移：给已有表加新列
+        import sqlalchemy
+        migrations = [
+            "ALTER TABLE collected_users ADD COLUMN owner_id INTEGER DEFAULT 0",
+            "ALTER TABLE touch_records ADD COLUMN xsec_token VARCHAR(256) DEFAULT ''",
+        ]
+        for sql in migrations:
+            try:
+                await conn.execute(sqlalchemy.text(sql))
+            except Exception:
+                pass  # 列已存在，忽略

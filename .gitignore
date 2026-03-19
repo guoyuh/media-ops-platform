@@ -46,3 +46,6 @@ Thumbs.db
 # Misc
 *.bak
 *.tmp
+data/
+start.sh.o
+ROADMAP.md

@@ -1,13 +1,16 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func as sa_func, delete
 from database import get_db
 from models.template import MessageTemplate
 from models.task import TouchRecord
 from models.account import PlatformAccount
+from models.auth_user import AuthUser
+from services.auth import get_current_user
 from pydantic import BaseModel
 from services.llm import generate_comment_reply, generate_xhs_reply
 from services.bilibili_sender import send_reply_comment
+from services.douyin_sender import send_douyin_comment
 from services.xhs_sender import send_xhs_comment
 from datetime import datetime
 import logging
@@ -29,6 +32,7 @@ class TemplateCreate(BaseModel):
 @router.post("/templates")
 async def create_template(
     body: TemplateCreate, db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     tpl = MessageTemplate(**body.model_dump())
     db.add(tpl)
@@ -38,7 +42,7 @@ async def create_template(
 
 
 @router.get("/templates")
-async def list_templates(db: AsyncSession = Depends(get_db)):
+async def list_templates(db: AsyncSession = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     result = await db.execute(select(MessageTemplate))
     templates = result.scalars().all()
     return {
@@ -71,6 +75,7 @@ class VideoItem(BaseModel):
 class XhsNoteItem(BaseModel):
     note_id: str
     title: str
+    xsec_token: str = ""
 
 
 class XhsCommentItem(BaseModel):
@@ -79,6 +84,21 @@ class XhsCommentItem(BaseModel):
     note_title: str
     nickname: str
     content: str
+    xsec_token: str = ""
+
+
+class DouyinVideoItem(BaseModel):
+    aweme_id: str
+    desc: str
+    author_nickname: str = ""
+
+
+class DouyinCommentItem(BaseModel):
+    cid: str
+    aweme_id: str
+    video_desc: str = ""
+    nickname: str
+    text: str
 
 
 class TouchCreateFromComments(BaseModel):
@@ -86,63 +106,103 @@ class TouchCreateFromComments(BaseModel):
     videos: list[VideoItem] = []
     xhs_notes: list[XhsNoteItem] = []
     xhs_comments: list[XhsCommentItem] = []
+    douyin_videos: list[DouyinVideoItem] = []
+    douyin_comments: list[DouyinCommentItem] = []
 
 
 @router.post("/touch")
 async def create_touch(
     body: TouchCreateFromComments, db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     created = 0
-    for c in body.comments:
-        rec = TouchRecord(
-            touch_type="comment",
-            target_rpid=c.rpid,
-            target_aid=c.aid,
-            target_message=c.message,
-            target_uname=c.uname,
-            video_title=c.video_title,
-            status="pending",
+    skipped = 0
+
+    async def _exists(platform: str, note_id: str, comment_id: str,
+                      rpid: int = 0, aid: int = 0) -> bool:
+        """检查同一用户下是否已存在相同触达记录"""
+        q = select(TouchRecord.id).where(
+            TouchRecord.user_id == current_user.id,
         )
-        db.add(rec)
+        if platform in ("xhs", "douyin"):
+            q = q.where(
+                TouchRecord.platform == platform,
+                TouchRecord.target_note_id == note_id,
+                TouchRecord.target_comment_id == comment_id,
+            )
+        else:
+            q = q.where(
+                TouchRecord.target_rpid == rpid,
+                TouchRecord.target_aid == aid,
+            )
+        return await db.scalar(q.limit(1)) is not None
+
+    for c in body.comments:
+        if await _exists("bilibili", "", "", rpid=c.rpid, aid=c.aid):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            target_rpid=c.rpid, target_aid=c.aid,
+            target_message=c.message, target_uname=c.uname,
+            video_title=c.video_title, status="pending",
+        ))
         created += 1
     for v in body.videos:
-        rec = TouchRecord(
-            touch_type="comment",
-            target_rpid=0,
-            target_aid=v.aid,
-            target_message="",
-            target_uname="",
-            video_title=v.title,
-            status="pending",
-        )
-        db.add(rec)
+        if await _exists("bilibili", "", "", rpid=0, aid=v.aid):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            target_rpid=0, target_aid=v.aid,
+            target_message="", target_uname="",
+            video_title=v.title, status="pending",
+        ))
         created += 1
     for n in body.xhs_notes:
-        rec = TouchRecord(
-            touch_type="comment",
-            platform="xhs",
-            target_note_id=n.note_id,
-            target_note_title=n.title,
-            target_message="",
-            target_uname="",
-            status="pending",
-        )
-        db.add(rec)
+        if await _exists("xhs", n.note_id, ""):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            platform="xhs", target_note_id=n.note_id,
+            target_note_title=n.title, xsec_token=n.xsec_token,
+            target_message="", target_uname="", status="pending",
+        ))
         created += 1
     for c in body.xhs_comments:
-        rec = TouchRecord(
-            touch_type="comment",
-            platform="xhs",
-            target_note_id=c.note_id,
-            target_note_title=c.note_title,
-            target_message=c.content,
-            target_uname=c.nickname,
+        if await _exists("xhs", c.note_id, c.comment_id):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            platform="xhs", target_note_id=c.note_id,
+            target_note_title=c.note_title, xsec_token=c.xsec_token,
+            target_comment_id=c.comment_id,
+            target_message=c.content, target_uname=c.nickname,
             status="pending",
-        )
-        db.add(rec)
+        ))
+        created += 1
+    for v in body.douyin_videos:
+        if await _exists("douyin", v.aweme_id, ""):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            platform="douyin", target_note_id=v.aweme_id,
+            target_note_title=v.desc, target_uname=v.author_nickname,
+            target_message="", status="pending",
+        ))
+        created += 1
+    for c in body.douyin_comments:
+        if await _exists("douyin", c.aweme_id, c.cid):
+            skipped += 1; continue
+        db.add(TouchRecord(
+            user_id=current_user.id, touch_type="comment",
+            platform="douyin", target_note_id=c.aweme_id,
+            target_note_title=c.video_desc,
+            target_comment_id=c.cid,
+            target_message=c.text, target_uname=c.nickname,
+            status="pending",
+        ))
         created += 1
     await db.commit()
-    return {"created": created}
+    return {"created": created, "skipped": skipped}
 
 
 # ── Generate AI reply ─────────────────────────────────────────
@@ -155,6 +215,7 @@ class GenerateBody(BaseModel):
 async def generate_reply(
     record_id: int, body: GenerateBody = GenerateBody(),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     rec = await db.get(TouchRecord, record_id)
     if not rec:
@@ -162,6 +223,11 @@ async def generate_reply(
     try:
         if rec.platform == "xhs":
             reply = await generate_xhs_reply(
+                rec.target_note_title, rec.target_message,
+                rec.target_uname, body.prompt,
+            )
+        elif rec.platform == "douyin":
+            reply = await generate_comment_reply(
                 rec.target_note_title, rec.target_message,
                 rec.target_uname, body.prompt,
             )
@@ -191,6 +257,7 @@ class BatchGenerateBody(BaseModel):
 async def batch_generate(
     body: BatchGenerateBody = BatchGenerateBody(),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     if body.record_ids:
         q = select(TouchRecord).where(
@@ -206,6 +273,11 @@ async def batch_generate(
         try:
             if rec.platform == "xhs":
                 reply = await generate_xhs_reply(
+                    rec.target_note_title, rec.target_message,
+                    rec.target_uname, body.prompt,
+                )
+            elif rec.platform == "douyin":
+                reply = await generate_comment_reply(
                     rec.target_note_title, rec.target_message,
                     rec.target_uname, body.prompt,
                 )
@@ -236,6 +308,7 @@ class TouchUpdate(BaseModel):
 async def update_touch(
     record_id: int, body: TouchUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     rec = await db.get(TouchRecord, record_id)
     if not rec:
@@ -251,6 +324,7 @@ async def update_touch(
 @router.delete("/touch/{record_id}")
 async def delete_touch(
     record_id: int, db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     rec = await db.get(TouchRecord, record_id)
     if not rec:
@@ -270,12 +344,13 @@ class SendBody(BaseModel):
 async def send_touch(
     record_id: int, body: SendBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     rec = await db.get(TouchRecord, record_id)
     if not rec:
         return {"error": "Record not found"}
     account = await db.get(PlatformAccount, body.account_id)
-    if not account or not account.cookies:
+    if not account or not account.cookies or account.owner_id != current_user.id:
         return {"error": "Account not found or no cookies"}
     if account.used_today >= account.daily_limit:
         return {"error": "账号今日限额已用完"}
@@ -292,10 +367,27 @@ async def send_touch(
                 cookie_str=account.cookies,
                 note_id=rec.target_note_id,
                 content=rec.final_reply,
-                target_comment_id=rec.target_rpid if rec.target_rpid else "",
+                target_comment_id=rec.target_comment_id or "",
             )
             # 小红书成功返回 {"success": true, "code": 0, ...}
             if resp.get("success") or resp.get("code") == 0:
+                rec.status = "sent"
+                rec.account_id = account.id
+                rec.sent_at = datetime.now()
+                account.used_today += 1
+            else:
+                rec.status = "failed"
+                rec.content = resp.get("msg", str(resp))[:500]
+        elif rec_platform == "douyin":
+            resp = await send_douyin_comment(
+                cookie_str=account.cookies,
+                aweme_id=rec.target_note_id or "",
+                content=rec.final_reply or "",
+                reply_to_cid=rec.target_comment_id or "",
+                reply_to_text=rec.target_message or "",
+                reply_to_nickname=rec.target_uname or "",
+            )
+            if resp.get("success"):
                 rec.status = "sent"
                 rec.account_id = account.id
                 rec.sent_at = datetime.now()
@@ -340,19 +432,21 @@ class BatchSendBody(BaseModel):
 async def batch_send(
     body: BatchSendBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     # 获取指定的账号
     current_account = await db.get(PlatformAccount, body.account_id)
-    if not current_account or not current_account.cookies:
+    if not current_account or not current_account.cookies or current_account.owner_id != current_user.id:
         return {"error": "Account not found or no cookies"}
 
-    platform = current_account.platform  # bilibili 或 xhs
+    platform = current_account.platform  # bilibili / xhs / douyin
 
     # 获取该平台所有可用账号
     all_accounts_result = await db.execute(
         select(PlatformAccount).where(
             PlatformAccount.platform == platform,
             PlatformAccount.is_active == True,
+            PlatformAccount.owner_id == current_user.id,
         )
     )
     all_accounts = list(all_accounts_result.scalars().all())
@@ -405,9 +499,28 @@ async def batch_send(
                     cookie_str=current_account.cookies,
                     note_id=rec.target_note_id,
                     content=rec.final_reply,
-                    target_comment_id=str(rec.target_rpid) if rec.target_rpid else "",
+                    target_comment_id=rec.target_comment_id or "",
                 )
                 if resp.get("success") or resp.get("code") == 0:
+                    rec.status = "sent"
+                    rec.account_id = current_account.id
+                    rec.sent_at = datetime.now()
+                    current_account.used_today += 1
+                    sent += 1
+                else:
+                    rec.status = "failed"
+                    rec.content = resp.get("msg", str(resp))[:500]
+                    failed += 1
+            elif platform == "douyin":
+                resp = await send_douyin_comment(
+                    cookie_str=current_account.cookies,
+                    aweme_id=rec.target_note_id or "",
+                    content=rec.final_reply or "",
+                    reply_to_cid=rec.target_comment_id or "",
+                    reply_to_text=rec.target_message or "",
+                    reply_to_nickname=rec.target_uname or "",
+                )
+                if resp.get("success"):
                     rec.status = "sent"
                     rec.account_id = current_account.id
                     rec.sent_at = datetime.now()
@@ -446,12 +559,24 @@ async def batch_send(
 # ── List records ──────────────────────────────────────────────
 
 @router.get("/records")
-async def list_records(db: AsyncSession = Depends(get_db)):
+async def list_records(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    base_filter = TouchRecord.user_id == current_user.id
+    total = await db.scalar(
+        select(sa_func.count(TouchRecord.id)).where(base_filter)
+    ) or 0
     result = await db.execute(
-        select(TouchRecord).order_by(TouchRecord.id.desc())
+        select(TouchRecord).where(base_filter)
+        .order_by(TouchRecord.id.desc())
+        .offset((page - 1) * size).limit(size)
     )
     records = result.scalars().all()
     return {
+        "total": total,
         "items": [
             {
                 "id": r.id,
@@ -463,9 +588,12 @@ async def list_records(db: AsyncSession = Depends(get_db)):
                 "video_title": r.video_title,
                 "target_note_id": r.target_note_id or "",
                 "target_note_title": r.target_note_title or "",
+                "target_comment_id": r.target_comment_id or "",
+                "xsec_token": r.xsec_token or "",
                 "ai_reply": r.ai_reply,
                 "final_reply": r.final_reply,
                 "status": r.status,
+                "content": r.content or "",
                 "account_id": r.account_id,
                 "sent_at": str(r.sent_at) if r.sent_at else None,
                 "created_at": str(r.created_at) if r.created_at else None,
@@ -473,3 +601,25 @@ async def list_records(db: AsyncSession = Depends(get_db)):
             for r in records
         ]
     }
+
+
+class BatchDeleteTouchBody(BaseModel):
+    ids: list[int]
+
+
+@router.post("/touch/batch-delete")
+async def batch_delete_touch(
+    body: BatchDeleteTouchBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    if not body.ids:
+        return {"deleted": 0}
+    result = await db.execute(
+        delete(TouchRecord).where(
+            TouchRecord.id.in_(body.ids),
+            TouchRecord.user_id == current_user.id,
+        )
+    )
+    await db.commit()
+    return {"deleted": result.rowcount}

@@ -6,6 +6,7 @@ class CollectedUser(Base):
     __tablename__ = "collected_users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_id = Column(Integer, default=0, index=True)  # 归属用户
     platform = Column(String(20), nullable=False, default="bilibili")
     platform_uid = Column(String(64), nullable=False, index=True)
     nickname = Column(String(128))

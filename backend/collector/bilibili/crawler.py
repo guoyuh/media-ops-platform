@@ -10,7 +10,7 @@ class BilibiliCrawler(AbstractCrawler):
     def __init__(self):
         self.client = BilibiliApiClient()
 
-    async def collect(self, task) -> dict | list:
+    async def collect(self, task, cookie_str: str = "") -> dict | list:
         if task.task_type == "keyword":
             return await self._search_users(task.keyword, task.max_count)
         if task.task_type == "video_comment":
@@ -19,7 +19,7 @@ class BilibiliCrawler(AbstractCrawler):
             return await self._follower_users(task.target_url, task.max_count)
         return []
 
-    async def search(self, keyword: str, max_count: int) -> dict:
+    async def search(self, keyword: str, max_count: int, cookie_str: str = "") -> dict:
         return await self._video_comments(keyword, max_count)
 
     # ── keyword search (user) ───────────────────────────────────

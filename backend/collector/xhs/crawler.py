@@ -6,7 +6,6 @@ from typing import Dict, List
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from collector.base import AbstractCrawler
-from config import settings
 from .client import XhsApiClient
 from .field import SearchSortType
 
@@ -41,14 +40,13 @@ def _parse_cookie_str(cookie_str: str) -> dict:
 class XhsCrawler(AbstractCrawler):
     platform = "xhs"
 
-    async def collect(self, task) -> dict:
-        return await self.search(task.keyword, task.max_count)
+    async def collect(self, task, cookie_str: str = "") -> dict:
+        return await self.search(task.keyword, task.max_count, cookie_str=cookie_str)
 
-    async def search(self, keyword: str, max_count: int) -> dict:
+    async def search(self, keyword: str, max_count: int, cookie_str: str = "") -> dict:
         """搜索笔记 + 采集评论，返回 {"notes": [...], "comments": [...]}"""
-        cookie_str = settings.XHS_COOKIES
         if not cookie_str:
-            raise ValueError("XHS_COOKIES 未配置，请在 config 或 .env 中设置")
+            raise ValueError("Cookie 未提供，请在账号管理中配置小红书账号")
 
         cookie_dict = _parse_cookie_str(cookie_str)
         headers = {**_XHS_HEADERS, "Cookie": cookie_str}
@@ -74,7 +72,7 @@ class XhsCrawler(AbstractCrawler):
 
             try:
                 notes = await self._search_notes(client, keyword, max_count)
-                comments = await self._fetch_all_comments(client, notes)
+                comments = await self._fetch_details_and_comments(client, notes)
             finally:
                 await browser.close()
 
@@ -83,11 +81,13 @@ class XhsCrawler(AbstractCrawler):
     async def _search_notes(
         self, client: XhsApiClient, keyword: str, max_count: int
     ) -> List[Dict]:
+        """搜索笔记，返回基本信息列表（不含发布时间）"""
         notes: List[Dict] = []
+        seen_ids: set = set()
         page = 1
         while len(notes) < max_count:
             data = await client.get_note_by_keyword(
-                keyword, page=page, sort=SearchSortType.GENERAL,
+                keyword, page=page, sort=SearchSortType.LATEST,
             )
             items = data.get("items") or []
             if not items:
@@ -95,8 +95,11 @@ class XhsCrawler(AbstractCrawler):
             for item in items:
                 if len(notes) >= max_count:
                     break
-                note_card = item.get("note_card", {})
                 note_id = item.get("id", "")
+                if note_id in seen_ids:
+                    continue
+                seen_ids.add(note_id)
+                note_card = item.get("note_card", {})
                 xsec_token = item.get("xsec_token", "")
                 user = note_card.get("user", {})
                 interact = note_card.get("interact_info", {})
@@ -112,19 +115,32 @@ class XhsCrawler(AbstractCrawler):
                     "collected_count": int(interact.get("collected_count", "0")),
                     "comment_count": int(interact.get("comment_count", "0")),
                     "share_count": int(interact.get("share_count", "0")),
+                    "time": 0,
                     "xsec_token": xsec_token,
                 })
             page += 1
             await asyncio.sleep(1.0)
         return notes
 
-    async def _fetch_all_comments(
+    async def _fetch_details_and_comments(
         self, client: XhsApiClient, notes: List[Dict]
     ) -> List[Dict]:
+        """对每篇笔记：获取详情补充发布时间 + 采集评论，合并在一个循环减少总耗时"""
         comments: List[Dict] = []
         for note in notes:
             note_id = note["note_id"]
             xsec_token = note.get("xsec_token", "")
+            # 1) 获取笔记详情 → 补充发布时间
+            try:
+                detail = await client.get_note_by_id(
+                    note_id, "pc_search", xsec_token
+                )
+                if detail:
+                    note["time"] = detail.get("time", 0) or detail.get("last_update_time", 0)
+            except Exception as e:
+                logger.warning(f"获取笔记 {note_id} 详情失败: {e}")
+            await asyncio.sleep(0.5)
+            # 2) 获取评论
             try:
                 raw = await client.get_note_all_comments(
                     note_id, xsec_token, max_count=20,
@@ -146,5 +162,5 @@ class XhsCrawler(AbstractCrawler):
                     })
             except Exception as e:
                 logger.warning(f"获取笔记 {note_id} 评论失败: {e}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
         return comments

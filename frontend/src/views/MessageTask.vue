@@ -7,7 +7,7 @@
           <el-select v-model="selectedAccountId" placeholder="选择发送账号"
             style="width:200px" size="default">
             <el-option v-for="a in accounts" :key="a.id"
-              :label="`${a.account_name} (${a.platform === 'xhs' ? '小红书' : 'B站'})`" :value="a.id" />
+              :label="`${a.account_name} (${a.platform === 'xhs' ? '小红书' : a.platform === 'douyin' ? '抖音' : 'B站'})`" :value="a.id" />
           </el-select>
         </div>
       </template>
@@ -24,13 +24,17 @@
           :disabled="!confirmedSelectedCount || !selectedAccountId">
           批量发送 ({{ confirmedSelectedCount }})
         </el-button>
+        <el-button type="danger" @click="batchDelete"
+          :disabled="!selectedRows.length">
+          删除 ({{ selectedRows.length }})
+        </el-button>
       </div>
       <el-table :data="records" stripe @selection-change="onSelectionChange">
         <el-table-column type="selection" width="45" />
         <el-table-column label="平台" width="80">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.platform === 'xhs' ? 'danger' : ''">
-              {{ row.platform === 'xhs' ? '小红书' : 'B站' }}
+            <el-tag size="small" :type="row.platform === 'xhs' ? 'danger' : row.platform === 'douyin' ? 'warning' : ''">
+              {{ row.platform === 'xhs' ? '小红书' : row.platform === 'douyin' ? '抖音' : 'B站' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -45,7 +49,13 @@
         <el-table-column label="标题" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">
             <a v-if="row.platform === 'xhs' && row.target_note_id"
-              :href="`https://www.xiaohongshu.com/explore/${row.target_note_id}`"
+              :href="getXhsNoteUrl(row)"
+              target="_blank" rel="noopener"
+              style="color:#409eff;text-decoration:none">
+              {{ row.target_note_title || '-' }}
+            </a>
+            <a v-else-if="row.platform === 'douyin' && row.target_note_id"
+              :href="`https://www.douyin.com/video/${row.target_note_id}`"
               target="_blank" rel="noopener"
               style="color:#409eff;text-decoration:none">
               {{ row.target_note_title || '-' }}
@@ -83,6 +93,12 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="失败原因" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.status === 'failed'">{{ row.content || '-' }}</span>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="140">
           <template #default="{ row }">
             <el-button v-if="row.status==='ai_generated'" size="small"
@@ -96,6 +112,13 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination
+        v-if="recordTotal > 20"
+        style="margin-top:16px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="recordTotal" :page-size="20"
+        :current-page="recordPage"
+        @current-change="onRecordPageChange" />
     </el-card>
   </div>
 </template>
@@ -106,6 +129,8 @@ import http from '../api/http'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const records = ref<any[]>([])
+const recordPage = ref(1)
+const recordTotal = ref(0)
 const accounts = ref<any[]>([])
 const selectedAccountId = ref<number | null>(null)
 const selectedRows = ref<any[]>([])
@@ -132,17 +157,33 @@ const tagType = (s: string) => {
   return 'info'
 }
 
+const getXhsNoteUrl = (row: any) => {
+  const baseUrl = `https://www.xiaohongshu.com/explore/${row.target_note_id}`
+  if (row.xsec_token) {
+    return `${baseUrl}?xsec_token=${row.xsec_token}&xsec_source=pc_user`
+  }
+  return baseUrl
+}
+
 const onSelectionChange = (rows: any[]) => {
   selectedRows.value = rows
 }
 
 const loadRecords = async () => {
   try {
-    const { data } = await http.get('/api/message/records')
+    const { data } = await http.get('/api/message/records', {
+      params: { page: recordPage.value, size: 20 },
+    })
     records.value = data.items.map((r: any) => ({
       ...r, _sending: false,
     }))
+    recordTotal.value = data.total || 0
   } catch { /* */ }
+}
+
+const onRecordPageChange = (page: number) => {
+  recordPage.value = page
+  loadRecords()
 }
 
 const loadAccounts = async () => {
@@ -221,9 +262,29 @@ const sendReply = async (row: any) => {
     if (data.error) { ElMessage.error(data.error); return }
     row.status = data.status
     if (data.status === 'sent') ElMessage.success('发送成功')
-    else ElMessage.error('发送失败')
+    else {
+      const msg = data?.resp?.msg || data?.resp?.message || ''
+      row.content = msg || row.content || ''
+      ElMessage.error(msg ? `发送失败: ${msg}` : '发送失败')
+    }
   } catch { ElMessage.error('发送请求失败') }
   finally { row._sending = false }
+}
+
+const batchDelete = async () => {
+  const ids = selectedRows.value.map((r: any) => r.id)
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${ids.length} 条记录？`, '确认删除', { type: 'warning' },
+    )
+  } catch { return }
+  try {
+    const { data } = await http.post('/api/message/touch/batch-delete', { ids })
+    ElMessage.success(`已删除 ${data.deleted} 条`)
+    await loadRecords()
+  } catch {
+    ElMessage.error('删除失败')
+  }
 }
 
 const deleteRecord = async (row: any) => {

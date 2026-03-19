@@ -8,6 +8,7 @@
             <el-select v-model="platformFilter" placeholder="平台" style="width:100px" clearable>
               <el-option label="全部" value="" />
               <el-option label="小红书" value="xhs" />
+              <el-option label="抖音" value="douyin" />
               <el-option label="B站" value="bilibili" />
             </el-select>
             <el-input v-model="keyword" placeholder="搜索昵称" style="width:160px" @keyup.enter="loadUsers" clearable />
@@ -17,6 +18,10 @@
             <el-button type="warning" :disabled="!selectedRows.length || !selectedAccountId"
               :loading="fetchLoading" @click="fetchUserInfo">
               获取详情 ({{ selectedRows.length }})
+            </el-button>
+            <el-button type="danger" :disabled="!selectedRows.length"
+              @click="batchDeleteUsers">
+              删除 ({{ selectedRows.length }})
             </el-button>
           </div>
         </div>
@@ -30,12 +35,17 @@
           </template>
         </el-table-column>
         <el-table-column prop="nickname" label="昵称" width="120" />
-        <el-table-column label="小红书号/UID" width="180">
+        <el-table-column label="UID/主页" width="180">
           <template #default="{ row }">
             <el-link v-if="row.platform === 'xhs'"
               :href="`https://www.xiaohongshu.com/user/profile/${row.platform_uid}`"
               target="_blank" type="primary" :underline="false">
               {{ row.platform_uid }}
+            </el-link>
+            <el-link v-else-if="row.platform === 'douyin'"
+              :href="row.source_note_id ? `https://www.douyin.com/video/${row.source_note_id}` : `https://www.douyin.com/user/${row.platform_uid}`"
+              target="_blank" type="primary" :underline="false">
+              {{ row.source_note_id || row.platform_uid }}
             </el-link>
             <el-link v-else
               :href="`https://space.bilibili.com/${row.platform_uid}`"
@@ -46,8 +56,8 @@
         </el-table-column>
         <el-table-column label="平台" width="80">
           <template #default="{ row }">
-            <el-tag :type="row.platform === 'xhs' ? 'danger' : 'primary'" size="small">
-              {{ row.platform === 'xhs' ? '小红书' : 'B站' }}
+            <el-tag :type="row.platform === 'xhs' ? 'danger' : row.platform === 'douyin' ? 'warning' : 'primary'" size="small">
+              {{ row.platform === 'xhs' ? '小红书' : row.platform === 'douyin' ? '抖音' : 'B站' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -85,7 +95,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import http from '../api/http'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const statusMap: Record<string, string> = {
   new: '新用户',
@@ -157,9 +167,31 @@ const fetchUserInfo = async () => {
   }
 }
 
+const batchDeleteUsers = async () => {
+  const ids = selectedRows.value.map((u: any) => u.id)
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${ids.length} 个用户？`, '确认删除', { type: 'warning' },
+    )
+  } catch { return }
+  try {
+    const { data } = await http.post('/api/users/batch-delete', { ids })
+    ElMessage.success(`已删除 ${data.deleted} 个用户`)
+    loadUsers()
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
+
 const openUserPage = (row: any) => {
   if (row.platform === 'xhs') {
     window.open(`https://www.xiaohongshu.com/user/profile/${row.platform_uid}`, '_blank')
+  } else if (row.platform === 'douyin') {
+    if (row.source_note_id) {
+      window.open(`https://www.douyin.com/video/${row.source_note_id}`, '_blank')
+    } else {
+      window.open(`https://www.douyin.com/user/${row.platform_uid}`, '_blank')
+    }
   } else {
     window.open(`https://space.bilibili.com/${row.platform_uid}`, '_blank')
   }

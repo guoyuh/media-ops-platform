@@ -1,6 +1,10 @@
 <template>
   <el-container class="app-layout">
-    <el-aside :width="sidebarCollapsed ? '64px' : '200px'">
+    <el-aside
+      :width="sidebarCollapsed ? '64px' : '200px'"
+      @mouseenter="sidebarCollapsed = false"
+      @mouseleave="sidebarCollapsed = true"
+    >
       <div class="logo">{{ sidebarCollapsed ? 'M' : 'MediaOps' }}</div>
       <el-menu
         :default-active="route.path"
@@ -20,7 +24,7 @@
         </el-menu-item>
         <el-menu-item index="/media">
           <el-icon><Picture /></el-icon>
-          <template #title>媒体资源</template>
+          <template #title>媒体库</template>
         </el-menu-item>
         <el-menu-item index="/users">
           <el-icon><User /></el-icon>
@@ -30,17 +34,40 @@
           <el-icon><ChatDotRound /></el-icon>
           <template #title>触达任务</template>
         </el-menu-item>
+        <el-menu-item index="/creative">
+          <el-icon><Edit /></el-icon>
+          <template #title>创作中心</template>
+        </el-menu-item>
         <el-menu-item index="/accounts">
           <el-icon><Setting /></el-icon>
-          <template #title>账号管理</template>
+          <template #title>Cookie管理</template>
         </el-menu-item>
       </el-menu>
+      <div class="sidebar-bottom">
+        <div class="user-info" v-if="!sidebarCollapsed">
+          <div class="username">{{ authStore.user?.username || '未登录' }}</div>
+        </div>
+        <div class="user-info-collapsed" v-else>
+          <el-tooltip :content="authStore.user?.username || '未登录'" placement="right">
+            <div class="username-icon">{{ (authStore.user?.username || 'U')[0].toUpperCase() }}</div>
+          </el-tooltip>
+        </div>
+        <el-menu
+          :collapse="sidebarCollapsed"
+          background-color="#001529"
+          text-color="#ffffffb3"
+          active-text-color="#409eff"
+          class="logout-menu"
+        >
+          <el-menu-item index="" @click="handleLogout">
+            <el-icon><SwitchButton /></el-icon>
+            <template #title>退出登录</template>
+          </el-menu-item>
+        </el-menu>
+      </div>
     </el-aside>
     <el-container>
       <el-header>
-        <el-button text @click="toggleSidebar">
-          <el-icon :size="20"><Fold v-if="!sidebarCollapsed" /><Expand v-else /></el-icon>
-        </el-button>
         <span class="header-title">自媒体运营平台</span>
       </el-header>
       <el-main>
@@ -51,17 +78,23 @@
 </template>
 
 <script setup lang="ts">
-import { useRoute } from 'vue-router'
-import { useAppStore } from '../stores/app'
-import { storeToRefs } from 'pinia'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+import { ref } from 'vue'
 import {
-  DataBoard, Search, User, ChatDotRound, Setting, Fold, Expand, Picture,
+  DataBoard, Search, Picture, User, ChatDotRound, Edit, Setting, SwitchButton,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
-const appStore = useAppStore()
-const { sidebarCollapsed } = storeToRefs(appStore)
-const { toggleSidebar } = appStore
+const router = useRouter()
+const authStore = useAuthStore()
+
+const sidebarCollapsed = ref(true)
+
+function handleLogout() {
+  authStore.logout()
+  router.push('/login')
+}
 </script>
 
 <style scoped>
@@ -70,6 +103,8 @@ const { toggleSidebar } = appStore
   background: #001529;
   transition: width 0.3s;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .logo {
   height: 48px;
@@ -80,11 +115,49 @@ const { toggleSidebar } = appStore
   font-weight: bold;
   border-bottom: 1px solid #ffffff1a;
 }
+.el-aside > .el-menu {
+  flex: 1;
+  border-right: none;
+}
+.sidebar-bottom {
+  border-top: 1px solid #ffffff1a;
+}
+.user-info {
+  padding: 12px 16px;
+  color: #ffffffb3;
+  font-size: 14px;
+  border-bottom: 1px solid #ffffff1a;
+}
+.username {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-info-collapsed {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+  border-bottom: 1px solid #ffffff1a;
+}
+.username-icon {
+  width: 32px;
+  height: 32px;
+  line-height: 32px;
+  text-align: center;
+  background: #409eff;
+  color: #fff;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: bold;
+}
+.logout-menu {
+  border-right: none;
+}
 .el-header {
   display: flex;
   align-items: center;
   border-bottom: 1px solid #e8e8e8;
   background: #fff;
 }
-.header-title { margin-left: 12px; font-size: 16px; }
+.header-title { font-size: 16px; }
 </style>

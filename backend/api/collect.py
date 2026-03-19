@@ -3,7 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func as sa_func, delete as sa_delete
 from database import get_db
 from models.task import CollectTask, VideoPost, PostComment, XhsNote, XhsComment, XhsVideo, XhsImage
+from models.douyin import DouyinVideo, DouyinComment
 from models.user import CollectedUser
+from models.auth_user import AuthUser
+from services.auth import get_current_user
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/collect", tags=["Collect"])
@@ -19,8 +22,8 @@ class CollectTaskCreate(BaseModel):
 
 
 @router.post("/tasks")
-async def create_task(body: CollectTaskCreate, db: AsyncSession = Depends(get_db)):
-    task = CollectTask(**body.model_dump())
+async def create_task(body: CollectTaskCreate, db: AsyncSession = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
+    task = CollectTask(**body.model_dump(), owner_id=current_user.id)
     db.add(task)
     await db.commit()
     await db.refresh(task)
@@ -28,10 +31,22 @@ async def create_task(body: CollectTaskCreate, db: AsyncSession = Depends(get_db
 
 
 @router.get("/tasks")
-async def list_tasks(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CollectTask).order_by(CollectTask.id.desc()))
+async def list_tasks(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    base = select(CollectTask).where(CollectTask.owner_id == current_user.id)
+    total = await db.scalar(
+        select(sa_func.count(CollectTask.id)).where(CollectTask.owner_id == current_user.id)
+    ) or 0
+    result = await db.execute(
+        base.order_by(CollectTask.id.desc()).offset((page - 1) * size).limit(size)
+    )
     tasks = result.scalars().all()
     return {
+        "total": total,
         "items": [
             {
                 "id": t.id,
@@ -52,9 +67,9 @@ async def list_tasks(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/tasks/{task_id}/run")
-async def run_task(task_id: int, db: AsyncSession = Depends(get_db)):
+async def run_task(task_id: int, db: AsyncSession = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     task = await db.get(CollectTask, task_id)
-    if not task:
+    if not task or task.owner_id != current_user.id:
         return {"error": "Task not found"}
 
     task.status = "running"
@@ -62,7 +77,7 @@ async def run_task(task_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     try:
-        result = await _do_collect(task)
+        result = await _do_collect(task, db)
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)[:500]
@@ -73,13 +88,15 @@ async def run_task(task_id: int, db: AsyncSession = Depends(get_db)):
         return await _save_video_comments(db, task, result)
     if task.platform == "xhs":
         return await _save_xhs_notes(db, task, result)
+    if task.platform == "douyin":
+        return await _save_douyin_videos(db, task, result)
     return await _save_users(db, task, result)
 
 
 @router.delete("/tasks/{task_id}")
-async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     task = await db.get(CollectTask, task_id)
-    if not task:
+    if not task or task.owner_id != current_user.id:
         return {"error": "Task not found"}
     # 删除关联的视频和评论
     video_ids_q = select(VideoPost.id).where(VideoPost.source_task_id == task_id)
@@ -101,6 +118,13 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
     )
     await db.execute(
         sa_delete(XhsNote).where(XhsNote.source_task_id == task_id)
+    )
+    # 删除关联的抖音数据
+    await db.execute(
+        sa_delete(DouyinComment).where(DouyinComment.source_task_id == task_id)
+    )
+    await db.execute(
+        sa_delete(DouyinVideo).where(DouyinVideo.source_task_id == task_id)
     )
     await db.delete(task)
     await db.commit()
@@ -173,6 +197,7 @@ async def _save_users(db: AsyncSession, task, users: list[dict]) -> dict:
             select(CollectedUser.id).where(
                 CollectedUser.platform == "bilibili",
                 CollectedUser.platform_uid == u["mid"],
+                CollectedUser.owner_id == task.owner_id,
             ).limit(1)
         )
         if exists.scalar() is not None:
@@ -188,6 +213,7 @@ async def _save_users(db: AsyncSession, task, users: list[dict]) -> dict:
             following_count=u.get("following_count", 0),
             video_count=u.get("video_count", 0),
             source_task_id=task.id,
+            owner_id=task.owner_id,
         ))
         new_count += 1
 
@@ -197,21 +223,49 @@ async def _save_users(db: AsyncSession, task, users: list[dict]) -> dict:
     return {"collected": new_count, "duplicates_skipped": dup_count}
 
 
-async def _do_collect(task: CollectTask):
+async def _do_collect(task: CollectTask, db: AsyncSession):
     from collector.factory import create_crawler
+    from models.account import PlatformAccount
+    import logging
+
+    logger = logging.getLogger(__name__)
     crawler = create_crawler(task.platform)
-    return await crawler.collect(task)
+
+    # 从数据库获取对应平台的活跃账号 cookie（按 owner_id 过滤）
+    cookie_str = ""
+    if task.platform in ("xhs", "douyin"):
+        result = await db.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == task.platform,
+                PlatformAccount.is_active == True,
+                PlatformAccount.owner_id == task.owner_id,
+            ).limit(1)
+        )
+        account = result.scalar_one_or_none()
+        if account and account.cookies:
+            cookie_str = account.cookies
+
+    result = await crawler.collect(task, cookie_str=cookie_str)
+    logger.info(
+        "Crawler result for task %s: %d videos, %d comments",
+        task.id,
+        len(result.get("videos", result.get("notes", []))),
+        len(result.get("comments", [])),
+    )
+    return result
 
 
 async def _save_xhs_notes(db: AsyncSession, task, data: dict) -> dict:
     notes = data.get("notes", [])
     comments = data.get("comments", [])
     note_count = 0
+    note_dup = 0
     for n in notes:
         exists = await db.execute(
             select(XhsNote.id).where(XhsNote.note_id == n["note_id"]).limit(1)
         )
         if exists.scalar() is not None:
+            note_dup += 1
             continue
         db.add(XhsNote(
             note_id=n["note_id"], title=n.get("title", ""),
@@ -222,7 +276,9 @@ async def _save_xhs_notes(db: AsyncSession, task, data: dict) -> dict:
             collected_count=n.get("collected_count", 0),
             comment_count=n.get("comment_count", 0),
             share_count=n.get("share_count", 0),
+            time=n.get("time", 0),
             note_url=f"https://www.xiaohongshu.com/explore/{n['note_id']}",
+            xsec_token=n.get("xsec_token", ""),
             source_task_id=task.id,
         ))
         note_count += 1
@@ -247,10 +303,65 @@ async def _save_xhs_notes(db: AsyncSession, task, data: dict) -> dict:
             source_task_id=task.id,
         ))
         comment_count += 1
-    task.collected_count = note_count
+    task.collected_count = note_count + note_dup
     task.status = "done"
     await db.commit()
-    return {"collected_notes": note_count, "collected_comments": comment_count}
+    return {"collected_notes": note_count, "collected_comments": comment_count, "note_duplicates": note_dup}
+
+
+async def _save_douyin_videos(db: AsyncSession, task, data: dict) -> dict:
+    videos = data.get("videos", [])
+    comments = data.get("comments", [])
+    video_count = 0
+    for v in videos:
+        exists = await db.execute(
+            select(DouyinVideo.id).where(
+                DouyinVideo.aweme_id == v["aweme_id"]
+            ).limit(1)
+        )
+        if exists.scalar() is not None:
+            continue
+        db.add(DouyinVideo(
+            aweme_id=v["aweme_id"], desc=v.get("desc", ""),
+            author_uid=v.get("author_uid", ""),
+            author_nickname=v.get("author_nickname", ""),
+            author_avatar=v.get("author_avatar", ""),
+            digg_count=v.get("digg_count", 0),
+            comment_count=v.get("comment_count", 0),
+            share_count=v.get("share_count", 0),
+            play_count=v.get("play_count", 0),
+            create_time=v.get("create_time", 0),
+            source_task_id=task.id,
+        ))
+        video_count += 1
+    comment_count = 0
+    for c in comments:
+        exists = await db.execute(
+            select(DouyinComment.id).where(
+                DouyinComment.cid == c["cid"]
+            ).limit(1)
+        )
+        if exists.scalar() is not None:
+            continue
+        db.add(DouyinComment(
+            cid=c["cid"], aweme_id=c.get("aweme_id", ""),
+            text=c.get("text", ""), user_id=c.get("user_id", ""),
+            nickname=c.get("nickname", ""),
+            avatar=c.get("avatar", ""),
+            digg_count=c.get("digg_count", 0),
+            reply_comment_total=c.get("reply_comment_total", 0),
+            create_time=c.get("create_time", 0),
+            ip_location=c.get("ip_location", ""),
+            source_task_id=task.id,
+        ))
+        comment_count += 1
+    task.collected_count = video_count
+    task.status = "done"
+    await db.commit()
+    return {
+        "collected_videos": video_count,
+        "collected_comments": comment_count,
+    }
 
 
 # ── Video / Comment query endpoints ─────────────────────────
@@ -261,6 +372,7 @@ async def list_videos(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     q = select(VideoPost).where(
         VideoPost.source_task_id == task_id
@@ -291,6 +403,7 @@ async def list_comments(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     # Fetch parent video info for aid/title
     video = await db.get(VideoPost, post_id)
@@ -332,13 +445,12 @@ async def list_xhs_notes(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     q = select(XhsNote).where(
         XhsNote.source_task_id == task_id
     ).order_by(
-        XhsNote.liked_count.desc(),
-        XhsNote.collected_count.desc(),
-        XhsNote.comment_count.desc(),
+        XhsNote.time.desc(),
     )
     total_q = select(sa_func.count(XhsNote.id)).where(
         XhsNote.source_task_id == task_id
@@ -358,7 +470,9 @@ async def list_xhs_notes(
                 "collected_count": n.collected_count,
                 "comment_count": n.comment_count,
                 "share_count": n.share_count,
+                "time": n.time or 0,
                 "note_url": n.note_url,
+                "xsec_token": n.xsec_token or "",
             }
             for n in notes
         ],
@@ -371,6 +485,7 @@ async def list_xhs_comments(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     q = select(XhsComment).where(
         XhsComment.note_id == note_id,
@@ -413,6 +528,7 @@ class ExtractUsersBody(BaseModel):
 async def extract_users_from_comments(
     body: ExtractUsersBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """从小红书评论中提取潜在用户并保存"""
     from models.user import CollectedUser
@@ -446,6 +562,7 @@ async def extract_users_from_comments(
             select(CollectedUser.id).where(
                 CollectedUser.platform == "xhs",
                 CollectedUser.platform_uid == c.user_id,
+                CollectedUser.owner_id == current_user.id,
             ).limit(1)
         )
         if exists:
@@ -462,6 +579,7 @@ async def extract_users_from_comments(
             source_note_id=c.note_id,
             source_comment_id=c.comment_id,
             status="new",
+            owner_id=current_user.id,
         )
         db.add(user)
         new_users.append(user)
@@ -503,6 +621,7 @@ class ExtractAuthorsBody(BaseModel):
 async def extract_authors_from_notes(
     body: ExtractAuthorsBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """从小红书笔记中提取作者并保存到用户库"""
     from models.user import CollectedUser
@@ -527,6 +646,7 @@ async def extract_authors_from_notes(
             select(CollectedUser.id).where(
                 CollectedUser.platform == "xhs",
                 CollectedUser.platform_uid == n.user_id,
+                CollectedUser.owner_id == current_user.id,
             ).limit(1)
         )
         if exists:
@@ -542,6 +662,7 @@ async def extract_authors_from_notes(
             source_task_id=n.source_task_id,
             source_note_id=n.note_id,
             status="new",
+            owner_id=current_user.id,
         )
         db.add(user)
         new_users.append(user)
@@ -583,6 +704,7 @@ class FetchUserInfoBody(BaseModel):
 async def fetch_xhs_user_info(
     body: FetchUserInfoBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """获取小红书用户详细信息（粉丝数、获赞数等）"""
     from models.account import PlatformAccount
@@ -632,6 +754,7 @@ async def fetch_xhs_user_info(
 @router.get("/xhs-users")
 async def list_xhs_users(
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
     task_id: int | None = None,
     status: str | None = None,
     page: int = 1,
@@ -688,15 +811,15 @@ class ParseMediaBody(BaseModel):
 async def parse_xhs_media(
     body: ParseMediaBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """
     解析小红书笔记的视频/图片资源
 
-    返回多画质视频直链和有水印/无水印图片链接
+    通过 XHS API 获取笔记详情，返回多画质视频直链和有水印/无水印图片链接
     """
     from models.account import PlatformAccount
-    from services.xhs_media import parse_xhs_note_media
-    import asyncio
+    from services.xhs_media import batch_parse_xhs_notes_media
 
     account = await db.get(PlatformAccount, body.account_id)
     if not account or not account.cookies:
@@ -704,65 +827,71 @@ async def parse_xhs_media(
     if account.platform != "xhs":
         return {"error": "账号不是小红书平台"}
 
-    results = []
+    # 从数据库查询每个 note_id 对应的 xsec_token
+    note_items = []
+    for note_id in body.note_ids:
+        row = await db.scalar(
+            select(XhsNote.xsec_token).where(
+                XhsNote.note_id == note_id
+            ).limit(1)
+        )
+        note_items.append({
+            "note_id": note_id,
+            "xsec_token": row or "",
+        })
+
+    # 批量解析（复用同一个浏览器实例）
+    results = await batch_parse_xhs_notes_media(
+        account.cookies, note_items, interval=2.0,
+    )
+
+    # 保存到数据库
     videos_added = 0
     images_added = 0
-
-    for note_id in body.note_ids:
-        try:
-            result = await parse_xhs_note_media(account.cookies, note_id)
-            results.append(result)
-
-            if body.save_to_db and result.get("success"):
-                if result.get("type") == "video" and result.get("video"):
-                    # 保存视频信息
-                    video_info = result["video"]
-                    # 检查是否已存在
+    if body.save_to_db:
+        for result in results:
+            if not result.get("success"):
+                continue
+            nid = result["note_id"]
+            if result.get("type") == "video" and result.get("video"):
+                vi = result["video"]
+                exists = await db.scalar(
+                    select(XhsVideo.id).where(
+                        XhsVideo.note_id == nid
+                    ).limit(1)
+                )
+                if not exists:
+                    db.add(XhsVideo(
+                        note_id=nid,
+                        title=result.get("title", ""),
+                        cover_url=result.get("cover_url", ""),
+                        video_url_1080p=vi.get("video_url_1080p", ""),
+                        video_url_720p=vi.get("video_url_720p", ""),
+                        video_url_480p=vi.get("video_url_480p", ""),
+                        video_url_default=vi.get("video_url_default", ""),
+                        duration=vi.get("duration", 0),
+                        width=vi.get("width", 0),
+                        height=vi.get("height", 0),
+                    ))
+                    videos_added += 1
+            elif result.get("images"):
+                for img in result["images"]:
                     exists = await db.scalar(
-                        select(XhsVideo.id).where(XhsVideo.note_id == note_id).limit(1)
+                        select(XhsImage.id).where(
+                            XhsImage.note_id == nid,
+                            XhsImage.image_index == img["index"],
+                        ).limit(1)
                     )
                     if not exists:
-                        video = XhsVideo(
-                            note_id=note_id,
-                            title=result.get("title", ""),
-                            cover_url=result.get("cover_url", ""),
-                            video_url_1080p=video_info.get("video_url_1080p", ""),
-                            video_url_720p=video_info.get("video_url_720p", ""),
-                            video_url_480p=video_info.get("video_url_480p", ""),
-                            video_url_default=video_info.get("video_url_default", ""),
-                            duration=video_info.get("duration", 0),
-                            width=video_info.get("width", 0),
-                            height=video_info.get("height", 0),
-                        )
-                        db.add(video)
-                        videos_added += 1
-
-                elif result.get("images"):
-                    # 保存图片信息
-                    for img in result["images"]:
-                        # 检查是否已存在
-                        exists = await db.scalar(
-                            select(XhsImage.id).where(
-                                XhsImage.note_id == note_id,
-                                XhsImage.image_index == img["index"],
-                            ).limit(1)
-                        )
-                        if not exists:
-                            image = XhsImage(
-                                note_id=note_id,
-                                image_index=img["index"],
-                                url_watermark=img.get("url_watermark", ""),
-                                url_original=img.get("url_original", ""),
-                                width=img.get("width", 0),
-                                height=img.get("height", 0),
-                            )
-                            db.add(image)
-                            images_added += 1
-
-        except Exception as e:
-            results.append({"note_id": note_id, "success": False, "error": str(e)})
-
-        await asyncio.sleep(2)  # 避免频繁请求
+                        db.add(XhsImage(
+                            note_id=nid,
+                            image_index=img["index"],
+                            url_watermark=img.get("url_watermark", ""),
+                            url_original=img.get("url_original", ""),
+                            width=img.get("width", 0),
+                            height=img.get("height", 0),
+                        ))
+                        images_added += 1
 
     await db.commit()
 
@@ -776,6 +905,7 @@ async def parse_xhs_media(
 @router.get("/xhs-videos")
 async def list_xhs_videos(
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
     note_id: str | None = None,
     page: int = 1,
     size: int = 20,
@@ -820,6 +950,7 @@ async def list_xhs_videos(
 @router.get("/xhs-images")
 async def list_xhs_images(
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
     note_id: str | None = None,
     page: int = 1,
     size: int = 50,
@@ -863,25 +994,44 @@ class DownloadVideosBody(BaseModel):
     """下载视频"""
     video_ids: list[int] = []  # XhsVideo.id 列表，为空则下载所有未下载的
     quality: str = "default"  # 1080p / 720p / 480p / default
+    account_id: int | None = None
 
 
 @router.post("/xhs-download-videos")
 async def download_xhs_videos(
     body: DownloadVideosBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """
-    下载小红书视频到服务器
+    下载小红书视频到服务器。
+    XHS CDN 链接有时效性，下载前会重新解析获取最新链接。
     """
+    from models.account import PlatformAccount
+    from services.xhs_media import parse_xhs_note_media
     from services.xhs_downloader import download_xhs_video
     import asyncio
 
-    # 获取待下载的视频
+    # 1. 获取 XHS 账号 cookie
+    if body.account_id:
+        account = await db.get(PlatformAccount, body.account_id)
+    else:
+        result = await db.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == "xhs",
+                PlatformAccount.is_active == True,
+            ).limit(1)
+        )
+        account = result.scalar_one_or_none()
+    cookie_str = account.cookies if account else ""
+
+    # 2. 获取待下载的视频
     if body.video_ids:
         q = select(XhsVideo).where(XhsVideo.id.in_(body.video_ids))
     else:
-        q = select(XhsVideo).where(XhsVideo.download_status == "pending").limit(20)
-
+        q = select(XhsVideo).where(
+            XhsVideo.download_status == "pending"
+        ).limit(20)
     result = await db.execute(q)
     videos = result.scalars().all()
 
@@ -889,36 +1039,64 @@ async def download_xhs_videos(
     failed = 0
 
     for v in videos:
-        # 获取对应画质的 URL
-        url_map = {
-            "1080p": v.video_url_1080p,
-            "720p": v.video_url_720p,
-            "480p": v.video_url_480p,
-            "default": v.video_url_default,
-        }
-        video_url = url_map.get(body.quality) or v.video_url_default
+        # 重新解析获取最新视频链接
+        fresh_video = {}
+        if cookie_str:
+            xsec_token = await db.scalar(
+                select(XhsNote.xsec_token).where(
+                    XhsNote.note_id == v.note_id
+                ).limit(1)
+            ) or ""
+            try:
+                print(f"[DL] Re-parsing video {v.note_id}")
+                parsed = await parse_xhs_note_media(
+                    cookie_str, v.note_id, xsec_token,
+                )
+                if parsed.get("success") and parsed.get("video"):
+                    fresh_video = parsed["video"]
+            except Exception as e:
+                print(f"[DL] Re-parse video error: {e}")
+
+        # 优先使用新鲜链接
+        quality_key = f"video_url_{body.quality}"
+        video_url = (
+            fresh_video.get(quality_key)
+            or fresh_video.get("video_url_default")
+            or getattr(v, quality_key, "")
+            or v.video_url_default
+        )
 
         if not video_url:
+            print(f"[DL] No video URL for {v.note_id}")
             failed += 1
             continue
+
+        if video_url.startswith("http://"):
+            video_url = "https://" + video_url[7:]
 
         v.download_status = "downloading"
         await db.commit()
 
         try:
+            dl_headers = {"Cookie": cookie_str} if cookie_str else None
             res = await download_xhs_video(
                 note_id=v.note_id,
                 video_url=video_url,
                 quality=body.quality,
+                extra_headers=dl_headers,
             )
             if res.get("success"):
                 v.download_status = "done"
                 v.local_path = res.get("path", "")
                 downloaded += 1
+                print(f"[DL] Video OK {v.note_id} size={res.get('size')}")
             else:
+                err = res.get("error", "unknown")
+                print(f"[DL] Video failed {v.note_id}: {err}")
                 v.download_status = "failed"
                 failed += 1
-        except Exception:
+        except Exception as e:
+            print(f"[DL] Video exception {v.note_id}: {e}")
             v.download_status = "failed"
             failed += 1
 
@@ -932,61 +1110,278 @@ class DownloadImagesBody(BaseModel):
     """下载图片"""
     image_ids: list[int] = []  # XhsImage.id 列表，为空则下载所有未下载的
     use_original: bool = True  # True=无水印，False=有水印
+    account_id: int | None = None  # 用于重新获取 CDN 链接的账号 ID
 
 
 @router.post("/xhs-download-images")
 async def download_xhs_images(
     body: DownloadImagesBody,
     db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """
-    下载小红书图片到服务器
+    下载小红书图片到服务器。
+    XHS CDN 链接有时效性，下载前会重新解析获取最新链接。
     """
+    from models.account import PlatformAccount
+    from services.xhs_media import parse_xhs_note_media
     from services.xhs_downloader import download_xhs_image
     import asyncio
 
-    # 获取待下载的图片
+    # 1. 获取 XHS 账号 cookie
+    if body.account_id:
+        account = await db.get(PlatformAccount, body.account_id)
+    else:
+        result = await db.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == "xhs",
+                PlatformAccount.is_active == True,
+            ).limit(1)
+        )
+        account = result.scalar_one_or_none()
+    cookie_str = account.cookies if account else ""
+
+    # 2. 获取待下载的图片
     if body.image_ids:
         q = select(XhsImage).where(XhsImage.id.in_(body.image_ids))
     else:
-        q = select(XhsImage).where(XhsImage.download_status == "pending").limit(50)
-
+        q = select(XhsImage).where(
+            XhsImage.download_status == "pending"
+        ).limit(50)
     result = await db.execute(q)
     images = result.scalars().all()
+
+    if not images:
+        return {"downloaded": 0, "failed": 0, "error": "没有待下载的图片"}
+
+    # 3. 按 note_id 分组，重新解析获取最新 CDN 链接
+    from collections import defaultdict
+    note_images: dict[str, list] = defaultdict(list)
+    for img in images:
+        note_images[img.note_id].append(img)
 
     downloaded = 0
     failed = 0
 
-    for img in images:
-        url = img.url_original if body.use_original else img.url_watermark
+    for note_id, img_list in note_images.items():
+        fresh_urls = {}  # {image_index: {url_original, url_watermark}}
 
-        if not url:
-            failed += 1
-            continue
+        if cookie_str:
+            # 查询 xsec_token
+            xsec_token = await db.scalar(
+                select(XhsNote.xsec_token).where(
+                    XhsNote.note_id == note_id
+                ).limit(1)
+            ) or ""
+            try:
+                print(f"[DL] Re-parsing {note_id} for fresh URLs")
+                parsed = await parse_xhs_note_media(
+                    cookie_str, note_id, xsec_token,
+                )
+                if parsed.get("success") and parsed.get("images"):
+                    for pi in parsed["images"]:
+                        fresh_urls[pi["index"]] = {
+                            "url_original": pi.get("url_original", ""),
+                            "url_watermark": pi.get("url_watermark", ""),
+                        }
+                    print(f"[DL] Got {len(fresh_urls)} fresh URLs")
+                else:
+                    err = parsed.get("error", "unknown")
+                    print(f"[DL] Re-parse failed: {err}")
+            except Exception as e:
+                print(f"[DL] Re-parse error: {e}")
 
-        img.download_status = "downloading"
-        await db.commit()
-
-        try:
-            res = await download_xhs_image(
-                note_id=img.note_id,
-                image_url=url,
-                image_index=img.image_index,
-                watermark=not body.use_original,
-            )
-            if res.get("success"):
-                img.download_status = "done"
-                img.local_path = res.get("path", "")
-                downloaded += 1
+        for img in img_list:
+            # 优先使用刚解析的新鲜链接
+            fu = fresh_urls.get(img.image_index, {})
+            if body.use_original:
+                url = fu.get("url_original") or img.url_original
             else:
+                url = fu.get("url_watermark") or img.url_watermark
+
+            if not url:
+                print(f"[DL] No URL for {note_id} idx={img.image_index}")
                 img.download_status = "failed"
                 failed += 1
-        except Exception:
-            img.download_status = "failed"
-            failed += 1
+                continue
 
-        await asyncio.sleep(0.5)
+            # http -> https
+            if url.startswith("http://"):
+                url = "https://" + url[7:]
+
+            img.download_status = "downloading"
+            await db.commit()
+
+            try:
+                dl_headers = {"Cookie": cookie_str} if cookie_str else None
+                res = await download_xhs_image(
+                    note_id=img.note_id,
+                    image_url=url,
+                    image_index=img.image_index,
+                    watermark=not body.use_original,
+                    extra_headers=dl_headers,
+                )
+                if res.get("success"):
+                    img.download_status = "done"
+                    img.local_path = res.get("path", "")
+                    downloaded += 1
+                    print(f"[DL] OK {note_id} idx={img.image_index}"
+                          f" size={res.get('size', 0)}")
+                else:
+                    err = res.get("error", "unknown")
+                    print(f"[DL] Failed {note_id} idx={img.image_index}"
+                          f": {err}")
+                    img.download_status = "failed"
+                    failed += 1
+            except Exception as e:
+                print(f"[DL] Exception {note_id} idx={img.image_index}"
+                      f": {e}")
+                img.download_status = "failed"
+                failed += 1
+
+            await asyncio.sleep(0.5)
+
+        # 每个 note 解析间隔
+        await asyncio.sleep(1.0)
 
     await db.commit()
     return {"downloaded": downloaded, "failed": failed}
 
+
+# ── 抖音视频/评论查询 ──────────────────────────────────────────
+
+@router.get("/douyin-videos")
+async def list_douyin_videos(
+    task_id: int = Query(...),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    q = select(DouyinVideo).where(
+        DouyinVideo.source_task_id == task_id
+    ).order_by(
+        DouyinVideo.play_count.desc(),
+        DouyinVideo.digg_count.desc(),
+        DouyinVideo.comment_count.desc(),
+        DouyinVideo.share_count.desc(),
+    )
+    total_q = select(sa_func.count(DouyinVideo.id)).where(
+        DouyinVideo.source_task_id == task_id
+    )
+    total = await db.scalar(total_q) or 0
+    result = await db.execute(q.offset((page - 1) * size).limit(size))
+    videos = result.scalars().all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": v.id,
+                "aweme_id": v.aweme_id,
+                "desc": v.desc,
+                "author_uid": v.author_uid,
+                "author_nickname": v.author_nickname,
+                "author_avatar": v.author_avatar,
+                "digg_count": v.digg_count,
+                "comment_count": v.comment_count,
+                "share_count": v.share_count,
+                "play_count": v.play_count,
+                "create_time": v.create_time,
+            }
+            for v in videos
+        ],
+    }
+
+
+@router.get("/douyin-comments")
+async def list_douyin_comments(
+    aweme_id: str = Query(...),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    q = select(DouyinComment).where(
+        DouyinComment.aweme_id == aweme_id,
+    ).order_by(DouyinComment.digg_count.desc())
+    total_q = select(sa_func.count(DouyinComment.id)).where(
+        DouyinComment.aweme_id == aweme_id,
+    )
+    total = await db.scalar(total_q) or 0
+    result = await db.execute(q.offset((page - 1) * size).limit(size))
+    comments = result.scalars().all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": c.id,
+                "cid": c.cid,
+                "aweme_id": c.aweme_id,
+                "text": c.text,
+                "user_id": c.user_id,
+                "nickname": c.nickname,
+                "avatar": c.avatar,
+                "digg_count": c.digg_count,
+                "reply_comment_total": c.reply_comment_total,
+                "create_time": c.create_time,
+                "ip_location": c.ip_location,
+            }
+            for c in comments
+        ],
+    }
+
+
+# ── 抖音提取作者 ──────────────────────────────────────────────
+
+class DouyinExtractAuthorsBody(BaseModel):
+    aweme_ids: list[str]
+
+
+@router.post("/douyin-extract-authors")
+async def extract_douyin_authors(
+    body: DouyinExtractAuthorsBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    from models.user import CollectedUser
+
+    q = select(DouyinVideo).where(
+        DouyinVideo.aweme_id.in_(body.aweme_ids)
+    )
+    result = await db.execute(q)
+    videos = result.scalars().all()
+
+    added = 0
+    skipped = 0
+    updated = 0
+    for v in videos:
+        if not v.author_uid:
+            continue
+        exists_id = await db.scalar(
+            select(CollectedUser.id).where(
+                CollectedUser.platform == "douyin",
+                CollectedUser.platform_uid == v.author_uid,
+                CollectedUser.owner_id == current_user.id,
+            ).limit(1)
+        )
+        if exists_id:
+            skipped += 1
+            existing_user = await db.get(CollectedUser, exists_id)
+            if existing_user and not (existing_user.source_note_id or ""):
+                existing_user.source_note_id = v.aweme_id
+                updated += 1
+            continue
+        db.add(CollectedUser(
+            platform="douyin",
+            platform_uid=v.author_uid,
+            nickname=v.author_nickname,
+            avatar_url=v.author_avatar,
+            source_task_id=v.source_task_id,
+            source_note_id=v.aweme_id,
+            status="new",
+            owner_id=current_user.id,
+        ))
+        added += 1
+
+    await db.commit()
+    return {"added": added, "skipped": skipped, "updated": updated}

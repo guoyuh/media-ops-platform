@@ -150,3 +150,72 @@ async def send_xhs_reply(
         content=content,
         target_comment_id=target_comment_id,
     )
+
+
+async def check_xhs_cookie(cookie_str: str) -> Dict:
+    """
+    检测小红书 cookie 是否有效
+
+    调用 /api/sns/web/v1/user/selfinfo 轻量接口验证。
+    Returns:
+        {"valid": True/False, "nickname": "...", "msg": "..."}
+    """
+    if not cookie_str:
+        return {"valid": False, "msg": "Cookie 为空"}
+
+    cookie_dict = _parse_cookie_str(cookie_str)
+    a1 = cookie_dict.get("a1", "")
+    if not a1:
+        return {"valid": False, "msg": "Cookie 中缺少 a1"}
+
+    headers = {**_XHS_HEADERS, "Cookie": cookie_str}
+    uri = "/api/sns/web/v1/user/selfinfo"
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=headers["User-Agent"])
+
+        if os.path.exists(_STEALTH_JS):
+            await context.add_init_script(path=_STEALTH_JS)
+
+        await context.add_cookies([
+            {"name": k, "value": v, "domain": ".xiaohongshu.com", "path": "/"}
+            for k, v in cookie_dict.items()
+        ])
+
+        page = await context.new_page()
+        await page.goto("https://www.xiaohongshu.com/explore", wait_until="domcontentloaded")
+        await asyncio.sleep(2)
+
+        try:
+            signs = await sign_with_playwright(
+                page=page, uri=uri, data={}, a1=a1, method="GET"
+            )
+            headers.update({
+                "X-S": signs["x-s"],
+                "X-T": signs["x-t"],
+                "x-S-Common": signs["x-s-common"],
+                "X-B3-Traceid": signs["x-b3-traceid"],
+            })
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{_HOST}{uri}", headers=headers)
+
+            if resp.status_code != 200:
+                return {"valid": False, "msg": f"HTTP {resp.status_code}"}
+
+            data = resp.json()
+            logger.info(f"XHS cookie check response: {data}")
+
+            # 正常响应结构: {"code": 0, "success": true, "data": {"nickname": "...", ...}}
+            if data.get("success") or data.get("code") == 0:
+                nickname = data.get("data", {}).get("nickname", "")
+                return {"valid": True, "nickname": nickname, "msg": "Cookie 有效"}
+            else:
+                return {"valid": False, "msg": data.get("msg", "Cookie 已失效")}
+
+        except Exception as e:
+            logger.error(f"Check XHS cookie failed: {e}", exc_info=True)
+            return {"valid": False, "msg": f"检测失败: {str(e)}"}
+        finally:
+            await browser.close()

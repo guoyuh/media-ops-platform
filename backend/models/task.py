@@ -6,6 +6,7 @@ class CollectTask(Base):
     __tablename__ = "collect_tasks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_id = Column(Integer, default=0, index=True)
     name = Column(String(128), nullable=False)
     platform = Column(String(20), nullable=False, default="bilibili")
     task_type = Column(String(32), nullable=False)  # keyword / video_comment / follower
@@ -37,9 +38,11 @@ class TouchRecord(Base):
     ai_reply = Column(Text, default="")
     final_reply = Column(Text, default="")
     # XHS 扩展字段
-    platform = Column(String(20), default="bilibili")  # bilibili / xhs
-    target_note_id = Column(String(64), default="")     # XHS 笔记ID
-    target_note_title = Column(String(512), default="")  # 笔记标题（XHS 用）
+    platform = Column(String(20), default="bilibili")  # bilibili / xhs / douyin
+    target_note_id = Column(String(64), default="")     # XHS/抖音 笔记/视频ID
+    target_note_title = Column(String(512), default="")  # 笔记标题
+    target_comment_id = Column(String(64), default="")   # XHS/抖音 目标评论ID（回复用）
+    xsec_token = Column(String(256), default="")         # XHS xsec_token（用于生成可访问链接）
     # pending → ai_generated → confirmed → sent / failed
     status = Column(String(20), default="pending")
     sent_at = Column(DateTime)
@@ -101,6 +104,7 @@ class XhsNote(Base):
     ip_location = Column(String(64))
     time = Column(BigInteger)
     note_url = Column(Text)
+    xsec_token = Column(String(256), default="")
     source_task_id = Column(Integer, index=True)
     created_at = Column(DateTime, server_default=func.now())
 

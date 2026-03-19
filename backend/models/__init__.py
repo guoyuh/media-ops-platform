@@ -2,6 +2,9 @@ from models.user import CollectedUser
 from models.task import CollectTask, TouchRecord, VideoPost, PostComment, XhsNote, XhsComment, XhsVideo, XhsImage
 from models.account import PlatformAccount
 from models.template import MessageTemplate
+from models.creative import CreativePost
+from models.auth_user import AuthUser
+from models.douyin import DouyinVideo, DouyinComment
 
 __all__ = [
     "CollectedUser",
@@ -15,4 +18,8 @@ __all__ = [
     "XhsImage",
     "PlatformAccount",
     "MessageTemplate",
+    "CreativePost",
+    "AuthUser",
+    "DouyinVideo",
+    "DouyinComment",
 ]

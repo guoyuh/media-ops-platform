@@ -60,6 +60,7 @@ async def download_file(
     url: str,
     save_path: str,
     timeout: int = 300,
+    extra_headers: Dict | None = None,
 ) -> Dict:
     """
     下载单个文件
@@ -68,6 +69,7 @@ async def download_file(
         url: 文件 URL
         save_path: 保存路径
         timeout: 超时时间（秒）
+        extra_headers: 额外请求头（如 Cookie）
 
     Returns:
         {"success": True, "path": "xxx", "size": 12345}
@@ -79,13 +81,23 @@ async def download_file(
         # 确保目录存在
         _ensure_dir(os.path.dirname(save_path))
 
+        # http -> https
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
+        headers = {**_HEADERS}
+        if extra_headers:
+            headers.update(extra_headers)
+
+        print(f"[DL] Downloading: {url[:80]}...")
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url,
-                headers=_HEADERS,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 if resp.status != 200:
+                    print(f"[DL] HTTP {resp.status} for {url[:60]}")
                     return {"success": False, "error": f"HTTP {resp.status}"}
 
                 content_type = resp.headers.get("Content-Type", "")
@@ -120,18 +132,10 @@ async def download_xhs_video(
     video_url: str,
     quality: str = "default",
     download_dir: str = "",
+    extra_headers: Dict | None = None,
 ) -> Dict:
     """
     下载小红书视频
-
-    Args:
-        note_id: 笔记 ID
-        video_url: 视频 URL
-        quality: 画质标识 (1080p/720p/480p/default)
-        download_dir: 下载目录
-
-    Returns:
-        {"success": True, "path": "xxx", "size": 12345}
     """
     if not download_dir:
         download_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "videos")
@@ -140,12 +144,11 @@ async def download_xhs_video(
     filename = f"{note_id}_{quality}.mp4"
     save_path = os.path.join(download_dir, filename)
 
-    # 如果文件已存在，直接返回
     if os.path.exists(save_path):
         size = os.path.getsize(save_path)
         return {"success": True, "path": save_path, "size": size, "cached": True}
 
-    return await download_file(video_url, save_path)
+    return await download_file(video_url, save_path, extra_headers=extra_headers)
 
 
 async def download_xhs_image(
@@ -154,19 +157,10 @@ async def download_xhs_image(
     image_index: int = 0,
     watermark: bool = False,
     download_dir: str = "",
+    extra_headers: Dict | None = None,
 ) -> Dict:
     """
     下载小红书图片
-
-    Args:
-        note_id: 笔记 ID
-        image_url: 图片 URL
-        image_index: 图片序号
-        watermark: 是否有水印版本
-        download_dir: 下载目录
-
-    Returns:
-        {"success": True, "path": "xxx", "size": 12345}
     """
     if not download_dir:
         download_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "images")
@@ -176,16 +170,14 @@ async def download_xhs_image(
     filename = f"{note_id}_{image_index}{suffix}"
     save_path = os.path.join(download_dir, filename)
 
-    # 获取扩展名
     ext = _get_file_extension(image_url)
     full_path = f"{save_path}.{ext}"
 
-    # 如果文件已存在，直接返回
     if os.path.exists(full_path):
         size = os.path.getsize(full_path)
         return {"success": True, "path": full_path, "size": size, "cached": True}
 
-    return await download_file(image_url, save_path)
+    return await download_file(image_url, save_path, extra_headers=extra_headers)
 
 
 async def batch_download_videos(

@@ -50,6 +50,13 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination
+        v-if="taskTotal > 10"
+        style="margin-top:16px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="taskTotal" :page-size="10"
+        :current-page="taskPage"
+        @current-change="onTaskPageChange" />
     </el-card>
 
     <!-- 新建任务对话框 -->
@@ -61,6 +68,7 @@
         <el-form-item label="平台">
           <el-select v-model="form.platform" @change="onPlatformChange">
             <el-option label="小红书" value="xhs" />
+            <el-option label="抖音" value="douyin" />
             <el-option label="Bilibili" value="bilibili" />
           </el-select>
         </el-form-item>
@@ -77,7 +85,7 @@
           <el-input v-model="form.target_url" placeholder="B站用户主页链接或UID" />
         </el-form-item>
         <el-form-item label="最大数量">
-          <el-input-number v-model="form.max_count" :min="1" :max="1000" />
+          <el-input-number v-model="form.max_count" :min="1" :max="50" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -114,6 +122,12 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-if="videoTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="videoTotal" :page-size="20"
+        :current-page="videoPage"
+        @current-change="onVideoPageChange" />
       <template #footer>
         <span style="float:left;line-height:32px;color:#909399">
           已选 {{ selectedVideos.length }} 个视频
@@ -140,6 +154,12 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-if="commentTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="commentTotal" :page-size="20"
+        :current-page="commentPage"
+        @current-change="onCommentPageChange" />
       <template #footer>
         <span style="float:left;line-height:32px;color:#909399">
           已选 {{ selectedComments.length }} 条
@@ -159,7 +179,7 @@
         <el-table-column type="selection" width="45" />
         <el-table-column label="标题" min-width="240">
           <template #default="{ row }">
-            <a :href="row.note_url" target="_blank" rel="noopener"
+            <a :href="getXhsNoteUrl(row)" target="_blank" rel="noopener"
               style="color:#409eff;text-decoration:none">
               {{ row.title || '(无标题)' }}
             </a>
@@ -170,15 +190,26 @@
         <el-table-column prop="collected_count" label="收藏" width="80" />
         <el-table-column prop="comment_count" label="评论" width="80" />
         <el-table-column prop="type" label="类型" width="70" />
+        <el-table-column label="发布时间" width="160">
+          <template #default="{ row }">
+            {{ formatTime(row.time / 1000) }}
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="80">
           <template #default="{ row }">
             <el-button size="small"
-              @click="viewXhsComments(row.note_id, row.title)">
+              @click="viewXhsComments(row.note_id, row.title, row.xsec_token)">
               评论
             </el-button>
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-if="xhsNoteTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="xhsNoteTotal" :page-size="20"
+        :current-page="xhsNotePage"
+        @current-change="onXhsNotePageChange" />
       <template #footer>
         <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
           <span style="color:#909399">
@@ -223,6 +254,12 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-if="xhsCommentTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="xhsCommentTotal" :page-size="20"
+        :current-page="xhsCommentPage"
+        @current-change="onXhsCommentPageChange" />
       <template #footer>
         <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
           <span style="color:#909399">
@@ -245,6 +282,105 @@
         </div>
       </template>
     </el-dialog>
+
+    <!-- 抖音视频列表对话框 -->
+    <el-dialog v-model="douyinVideoDialogVisible" title="采集到的抖音视频" width="900px">
+      <el-table :data="douyinVideoList" stripe
+        @selection-change="onDouyinVideoSelectionChange">
+        <el-table-column type="selection" width="45" />
+        <el-table-column label="描述" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }">
+            <a :href="`https://www.douyin.com/video/${row.aweme_id}`"
+              target="_blank" rel="noopener"
+              style="color:#409eff;text-decoration:none">
+              {{ row.desc || '(无描述)' }}
+            </a>
+          </template>
+        </el-table-column>
+        <el-table-column prop="author_nickname" label="作者" width="120" />
+        <el-table-column prop="play_count" label="播放" width="80" />
+        <el-table-column prop="digg_count" label="点赞" width="80" />
+        <el-table-column prop="comment_count" label="评论" width="80" />
+        <el-table-column prop="share_count" label="分享" width="80" />
+        <el-table-column label="时间" width="160">
+          <template #default="{ row }">
+            {{ formatTime(row.create_time) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button size="small"
+              @click="viewDouyinComments(row.aweme_id, row.desc)">
+              评论
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination v-if="douyinVideoTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="douyinVideoTotal" :page-size="20"
+        :current-page="douyinVideoPage"
+        @current-change="onDouyinVideoPageChange" />
+      <template #footer>
+        <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
+          <span style="color:#909399">
+            已选 {{ selectedDouyinVideos.length }} 个视频
+          </span>
+          <div style="display:flex;gap:10px">
+            <el-button @click="douyinVideoDialogVisible = false">关闭</el-button>
+            <el-button type="warning" :disabled="!selectedDouyinVideos.length"
+              @click="extractDouyinAuthors">
+              提取作者
+            </el-button>
+            <el-button type="primary" :disabled="!selectedDouyinVideos.length"
+              @click="addDouyinVideosToTouch">
+              加入触达
+            </el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 抖音评论列表对话框 -->
+    <el-dialog v-model="douyinCommentDialogVisible"
+      :title="`评论详情 — ${currentDouyinVideoDesc}`" width="750px">
+      <el-empty v-if="!douyinCommentList.length" description="暂无评论数据" />
+      <el-table v-else :data="douyinCommentList" stripe
+        @selection-change="onDouyinCommentSelectionChange">
+        <el-table-column type="selection" width="45" />
+        <el-table-column prop="nickname" label="用户" width="120" />
+        <el-table-column prop="text" label="评论内容"
+          min-width="260" show-overflow-tooltip />
+        <el-table-column prop="digg_count" label="点赞" width="70" />
+        <el-table-column prop="ip_location" label="IP" width="80" />
+        <el-table-column label="时间" width="160">
+          <template #default="{ row }">
+            {{ formatTime(row.create_time) }}
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination v-if="douyinCommentTotal > 20"
+        style="margin-top:12px;justify-content:flex-end"
+        background layout="total, prev, pager, next"
+        :total="douyinCommentTotal" :page-size="20"
+        :current-page="douyinCommentPage"
+        @current-change="onDouyinCommentPageChange" />
+      <template #footer>
+        <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
+          <span style="color:#909399">
+            已选 {{ selectedDouyinComments.length }} 条
+          </span>
+          <div style="display:flex;gap:10px">
+            <el-button @click="douyinCommentDialogVisible = false">关闭</el-button>
+            <el-button type="primary" :disabled="!selectedDouyinComments.length"
+              @click="addDouyinCommentsToTouch">
+              加入触达
+            </el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -256,6 +392,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 const platformMap: Record<string, string> = {
   bilibili: 'Bilibili',
   xhs: '小红书',
+  douyin: '抖音',
 }
 const typeMap: Record<string, string> = {
   keyword: '关键词搜索',
@@ -280,6 +417,8 @@ const formatTime = (ts: number) => {
 }
 
 const tasks = ref<any[]>([])
+const taskPage = ref(1)
+const taskTotal = ref(0)
 const dialogVisible = ref(false)
 const form = ref({
   name: '', platform: 'xhs', task_type: 'keyword',
@@ -287,7 +426,7 @@ const form = ref({
 })
 
 const taskTypeOptions = computed(() => {
-  if (form.value.platform === 'xhs') {
+  if (form.value.platform === 'xhs' || form.value.platform === 'douyin') {
     return [{ label: '关键词搜索', value: 'keyword' }]
   }
   return [
@@ -319,12 +458,14 @@ const loadXhsAccounts = async () => {
 
 const canViewResult = (row: any) => {
   if (row.status !== 'done') return false
-  return row.task_type === 'video_comment' || row.platform === 'xhs'
+  return row.task_type === 'video_comment' || row.platform === 'xhs' || row.platform === 'douyin'
 }
 
 const viewResult = (row: any) => {
   if (row.platform === 'xhs') {
     viewXhsNotes(row.id)
+  } else if (row.platform === 'douyin') {
+    viewDouyinVideos(row.id)
   } else {
     viewVideos(row.id)
   }
@@ -334,29 +475,72 @@ const viewResult = (row: any) => {
 const videoDialogVisible = ref(false)
 const videoList = ref<any[]>([])
 const selectedVideos = ref<any[]>([])
+const videoPage = ref(1)
+const videoTotal = ref(0)
+const currentVideoTaskId = ref(0)
 const commentDialogVisible = ref(false)
 const commentList = ref<any[]>([])
 const currentVideoTitle = ref('')
 const currentVideoAid = ref(0)
 const selectedComments = ref<any[]>([])
+const commentPage = ref(1)
+const commentTotal = ref(0)
+const currentCommentPostId = ref(0)
 
 // ── XHS state ───────────────────────────────────────────────
 const xhsNoteDialogVisible = ref(false)
 const xhsNoteList = ref<any[]>([])
 const selectedXhsNotes = ref<any[]>([])
+const xhsNotePage = ref(1)
+const xhsNoteTotal = ref(0)
+const currentXhsNoteTaskId = ref(0)
 const xhsCommentDialogVisible = ref(false)
 const xhsCommentList = ref<any[]>([])
 const selectedXhsComments = ref<any[]>([])
 const currentXhsNoteTitle = ref('')
 const currentXhsNoteId = ref('')
+const currentXhsNoteXsecToken = ref('')
+const xhsCommentPage = ref(1)
+const xhsCommentTotal = ref(0)
+
+// ── Douyin state ────────────────────────────────────────────
+const douyinVideoDialogVisible = ref(false)
+const douyinVideoList = ref<any[]>([])
+const selectedDouyinVideos = ref<any[]>([])
+const douyinVideoPage = ref(1)
+const douyinVideoTotal = ref(0)
+const currentDouyinTaskId = ref(0)
+const douyinCommentDialogVisible = ref(false)
+const douyinCommentList = ref<any[]>([])
+const selectedDouyinComments = ref<any[]>([])
+const currentDouyinVideoDesc = ref('')
+const currentDouyinAwemeId = ref('')
+const douyinCommentPage = ref(1)
+const douyinCommentTotal = ref(0)
 
 const stripHtml = (html: string) => html?.replace(/<[^>]+>/g, '') || ''
 
+const getXhsNoteUrl = (note: any) => {
+  const baseUrl = `https://www.xiaohongshu.com/explore/${note.note_id}`
+  if (note.xsec_token) {
+    return `${baseUrl}?xsec_token=${note.xsec_token}&xsec_source=pc_user`
+  }
+  return baseUrl
+}
+
 const loadTasks = async () => {
   try {
-    const { data } = await http.get('/api/collect/tasks')
+    const { data } = await http.get('/api/collect/tasks', {
+      params: { page: taskPage.value, size: 10 },
+    })
     tasks.value = data.items
+    taskTotal.value = data.total || 0
   } catch { /* */ }
+}
+
+const onTaskPageChange = (page: number) => {
+  taskPage.value = page
+  loadTasks()
 }
 
 const createTask = async () => {
@@ -374,8 +558,12 @@ const runTask = async (row: any) => {
       row.status = 'failed'
       ElMessage.error(`采集失败: ${data.error}`)
     } else if (row.platform === 'xhs') {
+      let msg = `采集完成: ${data.collected_notes} 篇笔记, ${data.collected_comments} 条评论`
+      if (data.note_duplicates) msg += ` (跳过 ${data.note_duplicates} 篇重复)`
+      ElMessage.success(msg)
+    } else if (row.platform === 'douyin') {
       ElMessage.success(
-        `采集完成: ${data.collected_notes} 篇笔记, ${data.collected_comments} 条评论`
+        `采集完成: ${data.collected_videos} 个视频, ${data.collected_comments} 条评论`
       )
     } else if (row.task_type === 'video_comment') {
       ElMessage.success(
@@ -397,13 +585,27 @@ const runTask = async (row: any) => {
 
 const viewVideos = async (taskId: number) => {
   selectedVideos.value = []
+  currentVideoTaskId.value = taskId
+  videoPage.value = 1
+  await loadVideos()
+  videoDialogVisible.value = true
+}
+
+const loadVideos = async () => {
   try {
-    const { data } = await http.get('/api/collect/videos', { params: { task_id: taskId } })
+    const { data } = await http.get('/api/collect/videos', {
+      params: { task_id: currentVideoTaskId.value, page: videoPage.value, size: 20 },
+    })
     videoList.value = data.items
-    videoDialogVisible.value = true
+    videoTotal.value = data.total || 0
   } catch {
     ElMessage.error('加载视频列表失败')
   }
+}
+
+const onVideoPageChange = (page: number) => {
+  videoPage.value = page
+  loadVideos()
 }
 
 const onVideoSelectionChange = (rows: any[]) => {
@@ -417,7 +619,7 @@ const addVideosToTouch = async () => {
   }))
   try {
     const { data } = await http.post('/api/message/touch', { videos })
-    ElMessage.success(`已加入触达 ${data.created} 条`)
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
     videoDialogVisible.value = false
   } catch {
     ElMessage.error('加入触达失败')
@@ -427,15 +629,29 @@ const addVideosToTouch = async () => {
 const viewComments = async (postId: number, title: string = '') => {
   currentVideoTitle.value = stripHtml(title)
   selectedComments.value = []
+  currentCommentPostId.value = postId
+  commentPage.value = 1
+  await loadComments()
+  commentDialogVisible.value = true
+}
+
+const loadComments = async () => {
   try {
-    const { data } = await http.get('/api/collect/comments', { params: { post_id: postId } })
+    const { data } = await http.get('/api/collect/comments', {
+      params: { post_id: currentCommentPostId.value, page: commentPage.value, size: 20 },
+    })
     commentList.value = data.items
+    commentTotal.value = data.total || 0
     currentVideoAid.value = data.video_aid || 0
     if (data.video_title) currentVideoTitle.value = stripHtml(data.video_title)
-    commentDialogVisible.value = true
   } catch {
     ElMessage.error('加载评论列表失败')
   }
+}
+
+const onCommentPageChange = (page: number) => {
+  commentPage.value = page
+  loadComments()
 }
 
 const onCommentSelectionChange = (rows: any[]) => {
@@ -452,7 +668,7 @@ const addToTouch = async () => {
   }))
   try {
     const { data } = await http.post('/api/message/touch', { comments })
-    ElMessage.success(`已加入触达 ${data.created} 条`)
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
     commentDialogVisible.value = false
   } catch {
     ElMessage.error('加入触达失败')
@@ -463,13 +679,27 @@ const addToTouch = async () => {
 
 const viewXhsNotes = async (taskId: number) => {
   selectedXhsNotes.value = []
+  currentXhsNoteTaskId.value = taskId
+  xhsNotePage.value = 1
+  await loadXhsNotes()
+  xhsNoteDialogVisible.value = true
+}
+
+const loadXhsNotes = async () => {
   try {
-    const { data } = await http.get('/api/collect/xhs-notes', { params: { task_id: taskId } })
+    const { data } = await http.get('/api/collect/xhs-notes', {
+      params: { task_id: currentXhsNoteTaskId.value, page: xhsNotePage.value, size: 20 },
+    })
     xhsNoteList.value = data.items
-    xhsNoteDialogVisible.value = true
+    xhsNoteTotal.value = data.total || 0
   } catch {
     ElMessage.error('加载笔记列表失败')
   }
+}
+
+const onXhsNotePageChange = (page: number) => {
+  xhsNotePage.value = page
+  loadXhsNotes()
 }
 
 const onXhsNoteSelectionChange = (rows: any[]) => {
@@ -480,10 +710,11 @@ const addXhsNotesToTouch = async () => {
   const xhs_notes = selectedXhsNotes.value.map((n: any) => ({
     note_id: n.note_id,
     title: n.title || '(无标题)',
+    xsec_token: n.xsec_token || '',
   }))
   try {
     const { data } = await http.post('/api/message/touch', { xhs_notes })
-    ElMessage.success(`已加入触达 ${data.created} 条`)
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
     xhsNoteDialogVisible.value = false
   } catch {
     ElMessage.error('加入触达失败')
@@ -506,14 +737,23 @@ const parseNoteMedia = async () => {
     if (data.error) {
       ElMessage.error(data.error)
     } else {
-      let msg = `解析完成`
-      if (data.videos_added) msg += `，新增视频 ${data.videos_added} 个`
-      if (data.images_added) msg += `，新增图片 ${data.images_added} 张`
-      ElMessage.success(msg)
-      // 显示解析结果详情
-      const failed = data.results?.filter((r: any) => !r.success) || []
-      if (failed.length) {
-        console.warn('解析失败的笔记:', failed)
+      const results = data.results || []
+      const failed = results.filter((r: any) => !r.success)
+      const succeeded = results.filter((r: any) => r.success)
+
+      if (succeeded.length === 0 && results.length > 0) {
+        // 全部失败
+        const errors = failed.map((r: any) => r.error || '未知错误')
+        ElMessage.error(`解析失败：${errors[0]}`)
+        console.warn('解析失败详情:', failed)
+      } else {
+        let msg = `解析完成（成功 ${succeeded.length}/${results.length}）`
+        if (data.videos_added) msg += `，新增视频 ${data.videos_added} 个`
+        if (data.images_added) msg += `，新增图片 ${data.images_added} 张`
+        ElMessage.success(msg)
+        if (failed.length) {
+          console.warn('部分解析失败:', failed)
+        }
       }
     }
   } catch {
@@ -538,17 +778,31 @@ const extractUsersFromNotes = async () => {
   }
 }
 
-const viewXhsComments = async (noteId: string, title: string = '') => {
+const viewXhsComments = async (noteId: string, title: string = '', xsecToken: string = '') => {
   currentXhsNoteTitle.value = title || '(无标题)'
   currentXhsNoteId.value = noteId
+  currentXhsNoteXsecToken.value = xsecToken
   selectedXhsComments.value = []
+  xhsCommentPage.value = 1
+  await loadXhsComments()
+  xhsCommentDialogVisible.value = true
+}
+
+const loadXhsComments = async () => {
   try {
-    const { data } = await http.get('/api/collect/xhs-comments', { params: { note_id: noteId } })
+    const { data } = await http.get('/api/collect/xhs-comments', {
+      params: { note_id: currentXhsNoteId.value, page: xhsCommentPage.value, size: 20 },
+    })
     xhsCommentList.value = data.items
-    xhsCommentDialogVisible.value = true
+    xhsCommentTotal.value = data.total || 0
   } catch {
     ElMessage.error('加载评论列表失败')
   }
+}
+
+const onXhsCommentPageChange = (page: number) => {
+  xhsCommentPage.value = page
+  loadXhsComments()
 }
 
 const onXhsCommentSelectionChange = (rows: any[]) => {
@@ -562,10 +816,11 @@ const addXhsCommentsToTouch = async () => {
     note_title: currentXhsNoteTitle.value,
     nickname: c.nickname,
     content: c.content,
+    xsec_token: currentXhsNoteXsecToken.value,
   }))
   try {
     const { data } = await http.post('/api/message/touch', { xhs_comments })
-    ElMessage.success(`已加入触达 ${data.created} 条`)
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
     xhsCommentDialogVisible.value = false
   } catch {
     ElMessage.error('加入触达失败')
@@ -585,6 +840,109 @@ const extractUsersFromComments = async () => {
     ElMessage.success(msg)
   } catch {
     ElMessage.error('提取用户失败')
+  }
+}
+
+// ── Douyin: videos & comments ───────────────────────────────
+
+const viewDouyinVideos = async (taskId: number) => {
+  selectedDouyinVideos.value = []
+  currentDouyinTaskId.value = taskId
+  douyinVideoPage.value = 1
+  await loadDouyinVideos()
+  douyinVideoDialogVisible.value = true
+}
+
+const loadDouyinVideos = async () => {
+  try {
+    const { data } = await http.get('/api/collect/douyin-videos', {
+      params: { task_id: currentDouyinTaskId.value, page: douyinVideoPage.value, size: 20 },
+    })
+    douyinVideoList.value = data.items
+    douyinVideoTotal.value = data.total || 0
+  } catch {
+    ElMessage.error('加载抖音视频列表失败')
+  }
+}
+
+const onDouyinVideoPageChange = (page: number) => {
+  douyinVideoPage.value = page
+  loadDouyinVideos()
+}
+
+const onDouyinVideoSelectionChange = (rows: any[]) => {
+  selectedDouyinVideos.value = rows
+}
+
+const viewDouyinComments = async (awemeId: string, desc: string = '') => {
+  currentDouyinVideoDesc.value = desc || '(无描述)'
+  currentDouyinAwemeId.value = awemeId
+  selectedDouyinComments.value = []
+  douyinCommentPage.value = 1
+  await loadDouyinComments()
+  douyinCommentDialogVisible.value = true
+}
+
+const loadDouyinComments = async () => {
+  try {
+    const { data } = await http.get('/api/collect/douyin-comments', {
+      params: { aweme_id: currentDouyinAwemeId.value, page: douyinCommentPage.value, size: 20 },
+    })
+    douyinCommentList.value = data.items
+    douyinCommentTotal.value = data.total || 0
+  } catch {
+    ElMessage.error('加载抖音评论列表失败')
+  }
+}
+
+const onDouyinCommentPageChange = (page: number) => {
+  douyinCommentPage.value = page
+  loadDouyinComments()
+}
+
+const onDouyinCommentSelectionChange = (rows: any[]) => {
+  selectedDouyinComments.value = rows
+}
+
+const extractDouyinAuthors = async () => {
+  const aweme_ids = selectedDouyinVideos.value.map((v: any) => v.aweme_id)
+  try {
+    const { data } = await http.post('/api/collect/douyin-extract-authors', { aweme_ids })
+    ElMessage.success(`已提取 ${data.added} 个作者，跳过 ${data.skipped} 个重复`)
+  } catch {
+    ElMessage.error('提取作者失败')
+  }
+}
+
+const addDouyinVideosToTouch = async () => {
+  const douyin_videos = selectedDouyinVideos.value.map((v: any) => ({
+    aweme_id: v.aweme_id,
+    desc: v.desc || '(无描述)',
+    author_nickname: v.author_nickname || '',
+  }))
+  try {
+    const { data } = await http.post('/api/message/touch', { douyin_videos })
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
+    douyinVideoDialogVisible.value = false
+  } catch {
+    ElMessage.error('加入触达失败')
+  }
+}
+
+const addDouyinCommentsToTouch = async () => {
+  const douyin_comments = selectedDouyinComments.value.map((c: any) => ({
+    cid: c.cid,
+    aweme_id: currentDouyinAwemeId.value,
+    video_desc: currentDouyinVideoDesc.value,
+    nickname: c.nickname,
+    text: c.text,
+  }))
+  try {
+    const { data } = await http.post('/api/message/touch', { douyin_comments })
+    ElMessage.success(`已加入触达 ${data.created} 条` + (data.skipped ? `，跳过 ${data.skipped} 条重复` : ''))
+    douyinCommentDialogVisible.value = false
+  } catch {
+    ElMessage.error('加入触达失败')
   }
 }
 

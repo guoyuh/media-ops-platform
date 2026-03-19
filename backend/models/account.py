@@ -6,6 +6,7 @@ class PlatformAccount(Base):
     __tablename__ = "platform_accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_id = Column(Integer, default=0, index=True)
     platform = Column(String(20), nullable=False, default="bilibili")
     account_name = Column(String(128), nullable=False)
     cookies = Column(Text)

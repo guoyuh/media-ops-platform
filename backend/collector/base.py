@@ -20,9 +20,9 @@ class AbstractCrawler(ABC):
     platform: str = ""
 
     @abstractmethod
-    async def search(self, keyword: str, max_count: int) -> dict:
+    async def search(self, keyword: str, max_count: int, cookie_str: str = "") -> dict:
         ...
 
-    async def collect(self, task) -> dict | list:
+    async def collect(self, task, cookie_str: str = "") -> dict | list:
         """默认入口，子类可覆盖以支持多种 task_type"""
-        return await self.search(task.keyword, task.max_count)
+        return await self.search(task.keyword, task.max_count, cookie_str=cookie_str)
